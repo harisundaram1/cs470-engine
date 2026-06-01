@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cs470-engine"
+version = "0.1.0"
+description = "CS 470 interactive worksheet engine"
+requires-python = ">=3.10"
+dependencies = [
+    "ipywidgets",
+    "markdown",
+    "matplotlib",
+    "networkx",
+    "pyyaml",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cs470_engine*"]
