@@ -15,4 +15,4 @@ Stubbed and slated for later engine releases:
 from .worksheet import Worksheet
 
 __all__ = ["Worksheet"]
-__version__ = "0.1.0"
+__version__ = "0.2.1"

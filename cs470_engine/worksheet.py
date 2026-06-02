@@ -20,7 +20,7 @@ from .record import initial_markdown, updated_markdown
 from .concept import render_concept
 from .problems import render_problem, render_problem_answer_key
 from .scoring import credit_for_attempt, multi_select_credit
-from .submit import finalize_stub
+from .submit import finalize as _finalize
 
 
 DEFAULT_TIME_GATES = {"easy": 15, "medium": 30, "hard": 60}
@@ -211,7 +211,7 @@ class Worksheet:
         display(Markdown("\n".join(lines)))
 
     def finalize(self) -> None:
-        finalize_stub(self)
+        _finalize(self)
 
     # ------------------------------------------------------------------
     # Internal hook called from problem submit handlers

@@ -1,5 +1,0 @@
-ipywidgets
-markdown
-matplotlib
-networkx
-pyyaml
