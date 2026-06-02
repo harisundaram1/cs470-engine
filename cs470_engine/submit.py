@@ -65,7 +65,9 @@ class PrairieLearnBackend(SubmitBackend):
     """PrairieLearn Workspace backend: write ``results.json`` to the
     workspace home so PL collects it via ``gradedFiles: [\"results.json\"]``."""
 
-    RESULTS_PATH = Path("/home/jovyan/results.json")
+    RESULTS_PATH = Path(
+        os.environ.get("CS470_RESULTS_PATH", "/home/jovyan/results.json")
+    )
 
     def emit_results(self, results: dict, dest_dir: Path) -> Path:
         # dest_dir is ignored: PL collects from a fixed path in the home dir.
@@ -112,7 +114,6 @@ def build_results(ws) -> dict:
             problems[pid] = {
                 "answered": False,
                 "attempt": 0,
-                "correct": False,
                 "credit": 0.0,
                 "locked": False,
             }
@@ -120,10 +121,12 @@ def build_results(ws) -> dict:
         answered += 1
         credit = float(entry.get("credit", 0.0))
         total_credit += credit
+        # Note: per-problem `correct` is deliberately omitted — this is a
+        # participation grade, so results.json must not reveal which
+        # problems the student got right.
         problems[pid] = {
             "answered": True,
             "attempt": entry.get("attempt", 0),
-            "correct": bool(entry.get("correct", False)),
             "credit": credit,
             "locked": bool(entry.get("locked", False)),
         }
