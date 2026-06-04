@@ -86,14 +86,21 @@ class Worksheet:
         self.answer_key_mode: bool = False
 
         # Derive the per-lesson concept module path from the worksheet id.
-        # e.g., "lesson_01_ties_triads" -> worksheets/concepts/lesson_01.py
+        # Resolve RELATIVE TO THE YAML (source_path) first so concept cells work
+        # in any layout where a concepts/ dir travels beside the YAML: the dev
+        # repo (worksheets/lesson_*.yaml + worksheets/concepts/) and the flat PL
+        # workspace (lesson_*.yaml + concepts/) alike. Fall back to the
+        # repo_root-relative path for backward compatibility with the dev tree.
         m = re.match(r"(lesson_\d+)", self.id)
-        if m and self.repo_root is not None:
-            self.concepts_module_path = (
-                self.repo_root / "worksheets" / "concepts" / f"{m.group(1)}.py"
-            )
-        else:
-            self.concepts_module_path = None
+        self.concepts_module_path = None
+        if m:
+            beside_yaml = source_path.parent / "concepts" / f"{m.group(1)}.py"
+            if beside_yaml.exists():
+                self.concepts_module_path = beside_yaml
+            elif self.repo_root is not None:
+                self.concepts_module_path = (
+                    self.repo_root / "worksheets" / "concepts" / f"{m.group(1)}.py"
+                )
 
     # ------------------------------------------------------------------
     # Public API used by build-emitted cells
