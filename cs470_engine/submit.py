@@ -78,9 +78,10 @@ class PrairieLearnBackend(SubmitBackend):
 
     def submission_instructions(self) -> str:
         return (
-            "Click **Save & Grade** above the workspace to submit. "
-            "PrairieLearn will read your results and record your "
-            "participation credit automatically."
+            "✅ Your work is saved. **One more step**: leave this workspace, "
+            "return to the PrairieLearn question page (the tab you came from), "
+            "and click the blue Save & Grade button there. Your participation "
+            "won't be recorded until you do."
         )
 
 

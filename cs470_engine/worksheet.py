@@ -35,19 +35,33 @@ class Worksheet:
     def load(cls, yaml_basename: str) -> "Worksheet":
         """Resolve and load a worksheet YAML by basename.
 
-        Searches, in order:
-          1. `<cwd>/<yaml_basename>`
-          2. `<cwd>/worksheets/<yaml_basename>`
-          3. `<inferred_repo_root>/worksheets/<yaml_basename>`, where the
-             repo root is `Path(__file__).resolve().parents[2]` (works
-             under `pip install -e ./engine`).
-        """
-        inferred_repo_root = Path(__file__).resolve().parents[2]
-        if not (inferred_repo_root / "worksheets").is_dir():
-            inferred_repo_root = None
+        Searches UPWARD from the current working directory: starting at cwd
+        and walking up to the filesystem root, at each level it checks
+        ``<dir>/worksheets/<basename>`` then ``<dir>/<basename>``, returning
+        the first hit (so the directory nearest cwd wins). This makes the
+        lookup independent of where Jupyter was launched: it resolves the dev
+        tree (notebooks in ``iPython/``, YAML in ``../worksheets/``) and the
+        flat PrairieLearn workspace (YAML sitting directly in cwd) alike.
 
-        candidates = [Path(yaml_basename), Path("worksheets") / yaml_basename]
-        if inferred_repo_root is not None:
+        As a last resort it falls back to the inferred repo root
+        ``Path(__file__).resolve().parents[2] / worksheets`` (works under an
+        editable install of the engine inside the dev tree).
+
+        ``source_path`` is set to whatever path resolves, and concept-module
+        resolution in ``__init__`` is relative to ``source_path.parent`` — so
+        a ``concepts/`` dir traveling beside the YAML is always found.
+        """
+        candidates: list[Path] = []
+        cwd = Path.cwd().resolve()
+        for d in [cwd, *cwd.parents]:
+            candidates.append(d / "worksheets" / yaml_basename)
+            candidates.append(d / yaml_basename)
+
+        # Last-resort fallback: the repo root inferred from the engine's own
+        # install location (covers an editable install run from outside the
+        # tree). Only meaningful if that tree actually has a worksheets/ dir.
+        inferred_repo_root = Path(__file__).resolve().parents[2]
+        if (inferred_repo_root / "worksheets").is_dir():
             candidates.append(inferred_repo_root / "worksheets" / yaml_basename)
 
         for p in candidates:
