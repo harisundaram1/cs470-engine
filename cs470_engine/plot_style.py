@@ -45,6 +45,7 @@ COLORS = {
     "quaternary": "#C19A6B",   # caramel
     "good":       "#1A9641",   # ColorBrewer green
     "bad":        "#B2182B",   # ColorBrewer red
+    "highlight":  "#009FD4",   # Arches (Illinois supporting) — flipped/highlighted edges
     "panel_bg":   "#EEF0F7",   # pale lavender-grey
     "minor_tick": "#D2D2D2",   # light gray
     "text":       "black",
