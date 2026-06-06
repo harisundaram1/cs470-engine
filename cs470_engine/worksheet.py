@@ -9,7 +9,6 @@ Public API (matches what scripts/build.py emits in each generated notebook):
     ws.finalize() -> None
 """
 
-import re
 import uuid
 from pathlib import Path
 
@@ -99,22 +98,27 @@ class Worksheet:
         self.scores: dict[str, dict] = {}
         self.answer_key_mode: bool = False
 
-        # Derive the per-lesson concept module path from the worksheet id.
+        # Derive the per-worksheet concept module path from the FULL worksheet
+        # id stem (one module per worksheet, not per lesson number): id
+        # `lesson_01_ties_triads` -> `concepts/lesson_01_ties_triads.py`,
+        # `lesson_01_2_structural_balance` -> the matching full-id module. This
+        # avoids collisions between sub-lectures of the same lesson (1.1/1.2/1.3
+        # all begin `lesson_01`), which a `lesson_\d+`-only stem would conflate.
+        #
         # Resolve RELATIVE TO THE YAML (source_path) first so concept cells work
         # in any layout where a concepts/ dir travels beside the YAML: the dev
         # repo (worksheets/lesson_*.yaml + worksheets/concepts/) and the flat PL
         # workspace (lesson_*.yaml + concepts/) alike. Fall back to the
         # repo_root-relative path for backward compatibility with the dev tree.
-        m = re.match(r"(lesson_\d+)", self.id)
+        module_stem = self.id
         self.concepts_module_path = None
-        if m:
-            beside_yaml = source_path.parent / "concepts" / f"{m.group(1)}.py"
-            if beside_yaml.exists():
-                self.concepts_module_path = beside_yaml
-            elif self.repo_root is not None:
-                self.concepts_module_path = (
-                    self.repo_root / "worksheets" / "concepts" / f"{m.group(1)}.py"
-                )
+        beside_yaml = source_path.parent / "concepts" / f"{module_stem}.py"
+        if beside_yaml.exists():
+            self.concepts_module_path = beside_yaml
+        elif self.repo_root is not None:
+            self.concepts_module_path = (
+                self.repo_root / "worksheets" / "concepts" / f"{module_stem}.py"
+            )
 
     # ------------------------------------------------------------------
     # Public API used by build-emitted cells
