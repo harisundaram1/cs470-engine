@@ -28,6 +28,8 @@ Aesthetic rules (enforced by scripts/validate.py)
 8. No redundant legends when direct labels work.
 """
 
+import math
+
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 import networkx as nx
@@ -213,6 +215,93 @@ def apply_ax_style(ax):
 
 
 # -----------------------------------------------------------------------------
+# Signed-edge rendering (structural-balance worksheets)
+# -----------------------------------------------------------------------------
+
+#: Edge attribute key carrying a sign, and its two values, as emitted by the
+#: worksheet YAML (e.g. ``- [A, B, {sign: pos}]``).
+_SIGN_KEY = "sign"
+_SIGN_POS = "pos"
+_SIGN_NEG = "neg"
+
+#: Gentle, consistent curvature for signed edges so the two members of a
+#: crossing pair (e.g. the A-D / B-C diagonals) bow apart and their sign labels
+#: never overlap. Matches the worksheet module's ``_draw_signed_graph``.
+_SIGN_EDGE_RAD = 0.22
+
+
+def _sign_label(sign):
+    """Mathtext sign glyph — ``$-$`` avoids any Helvetica/Unicode fallback."""
+    return "$+$" if sign == _SIGN_POS else "$-$"
+
+
+def _sign_color(sign):
+    """Positive edges navy (primary); negative edges red (bad)."""
+    return COLORS["primary"] if sign == _SIGN_POS else COLORS["bad"]
+
+
+def _arc_apex(p_u, p_v, rad):
+    """Apex (t=0.5 point) of matplotlib's ``arc3,rad`` quadratic Bezier.
+
+    The control point is the straight midpoint displaced perpendicular to the
+    edge by ``rad * |edge|`` (positive rad bows toward ``(-dy, dx)``), so the
+    apex — where the sign label belongs — is the midpoint displaced by
+    ``(rad / 2) * |edge|`` along that same perpendicular. networkx/matplotlib
+    otherwise place edge labels at the straight midpoint even on curved edges.
+    """
+    (x1, y1), (x2, y2) = p_u, p_v
+    mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    dx, dy = x2 - x1, y2 - y1
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return mx, my
+    nx_, ny_ = -dy / length, dx / length
+    off = 0.5 * rad * length
+    return mx + nx_ * off, my + ny_ * off
+
+
+def _draw_signed_edges(G, pos, ax, signed_edges, *, highlight_set, node_size):
+    """Draw signed edges with curvature + apex sign labels + sign color.
+
+    Mirrors the worksheet module's ``_draw_signed_graph`` so concept-cell and
+    question signed graphs look identical. Highlighted signed edges use the
+    Arches highlight color and a thicker stroke.
+    """
+    conn = f"arc3,rad={_SIGN_EDGE_RAD}"
+    for u, v in signed_edges:
+        sign = (G.get_edge_data(u, v) or {}).get(_SIGN_KEY)
+        highlighted = tuple(sorted((u, v))) in highlight_set
+        if highlighted:
+            color = COLORS["highlight"]
+            width = GRAPH_STYLE["highlight_edge_width"]
+        else:
+            color = _sign_color(sign)
+            width = GRAPH_STYLE["edge_width"]
+        # arrows=True forces FancyArrowPatches (the LineCollection path silently
+        # ignores connectionstyle); arrowstyle="-" keeps edges headless.
+        nx.draw_networkx_edges(
+            G, pos, ax=ax, edgelist=[(u, v)],
+            edge_color=color, width=width,
+            connectionstyle=conn, arrows=True, arrowstyle="-",
+            node_size=node_size,
+        )
+    # Sign labels at each edge's curved-arc apex.
+    for u, v in signed_edges:
+        sign = (G.get_edge_data(u, v) or {}).get(_SIGN_KEY)
+        lx, ly = _arc_apex(pos[u], pos[v], _SIGN_EDGE_RAD)
+        lab_color = (COLORS["highlight"] if tuple(sorted((u, v))) in highlight_set
+                     else _sign_color(sign))
+        ax.text(
+            lx, ly, _sign_label(sign),
+            ha="center", va="center",
+            fontsize=GRAPH_STYLE["label_font_size"],
+            color=lab_color,
+            bbox=dict(boxstyle="circle,pad=0.12", fc="white", ec="none"),
+            zorder=4,
+        )
+
+
+# -----------------------------------------------------------------------------
 # Graph rendering helper
 # -----------------------------------------------------------------------------
 
@@ -234,6 +323,13 @@ def draw_graph(
     edges. Edges with attribute ``strength='weak'`` or ``style='dashed'``
     are rendered dashed. Highlighted nodes and edges use accent orange with
     thicker stroke.
+
+    Edges carrying a ``sign`` attribute (``'pos'`` / ``'neg'``, as emitted by
+    structural-balance worksheet YAML) are drawn as **signed edges**: gently
+    curved, colored by sign (positive navy, negative red), with a ``+`` / ``$-$``
+    mathtext label at the curved-arc apex. The Arches highlight color marks a
+    highlighted signed edge. Edges WITHOUT a ``sign`` attribute are completely
+    unaffected by this and render exactly as before.
 
     Parameters
     ----------
@@ -282,15 +378,31 @@ def draw_graph(
             return GRAPH_STYLE["weak_edge_style"]
         return "solid"
 
-    # Edges partitioned by style and highlight status
-    solid_all = [(u, v) for u, v in G.edges() if _style_for(u, v) == "solid"]
-    dashed_all = [(u, v) for u, v in G.edges()
-                  if _style_for(u, v) == GRAPH_STYLE["weak_edge_style"]]
-
     # Normalize highlight edges to canonical (sorted) tuple for matching
     highlight_set = {tuple(sorted((u, v))) for u, v in highlight_edges}
     def _is_highlighted(u, v):
         return tuple(sorted((u, v))) in highlight_set
+
+    # Signed edges (structural-balance figures) get the curve + apex-label +
+    # sign-color treatment. Edges WITHOUT a `sign` attribute fall through to the
+    # legacy path below and render exactly as before — no label, no color/style
+    # change, no curvature — so unsigned graphs (e.g. 1.1's tie/triad figures)
+    # are visually unchanged.
+    signed_edges = [(u, v) for u, v in G.edges()
+                    if _SIGN_KEY in (G.get_edge_data(u, v) or {})]
+    if signed_edges:
+        _draw_signed_edges(
+            G, pos, ax, signed_edges,
+            highlight_set=highlight_set, node_size=node_size,
+        )
+    signed_set = {tuple(sorted(e)) for e in signed_edges}
+
+    # Legacy (unsigned) edges partitioned by style and highlight status.
+    unsigned = [(u, v) for u, v in G.edges()
+                if tuple(sorted((u, v))) not in signed_set]
+    solid_all = [(u, v) for u, v in unsigned if _style_for(u, v) == "solid"]
+    dashed_all = [(u, v) for u, v in unsigned
+                  if _style_for(u, v) == GRAPH_STYLE["weak_edge_style"]]
 
     base_solid = [e for e in solid_all if not _is_highlighted(*e)]
     base_dashed = [e for e in dashed_all if not _is_highlighted(*e)]
