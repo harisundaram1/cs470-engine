@@ -284,36 +284,80 @@ def signed_edges_cross(pos, edges):
     return False
 
 
-def _shrink_endpoints(ax, p0, p2, node_size):
-    """Pull p0, p2 toward each other by the node radius (in data units).
+def _node_radius_data(ax, node_size):
+    """Marker radius (``sqrt(node_size/pi)`` points) in DATA units.
 
-    ``node_size`` is matplotlib's marker area in points^2; the radius is
-    ``sqrt(node_size / pi)`` points, converted to data units via the axes
-    transform so the drawn curve meets the node borders cleanly.
+    Requires the axes limits + aspect to already be set (call after
+    ``frame_signed_axes``) so the data<->display transform is stable. Falls back
+    to 0 if the transform is not yet usable.
     """
-    (x0, y0), (x2, y2) = p0, p2
-    dx, dy = x2 - x0, y2 - y0
-    length = math.hypot(dx, dy)
-    if length == 0:
-        return p0, p2
     r_points = math.sqrt(max(node_size, 0.0) / math.pi)
-    # points -> data units: 1 point = 1/72 inch; figure dpi gives px; transData
-    # maps data->display(px). Invert one data unit's pixel length.
     try:
         x_px0, _ = ax.transData.transform((0, 0))
         x_px1, _ = ax.transData.transform((1, 0))
         px_per_data = abs(x_px1 - x_px0) or 1.0
         px_per_point = ax.figure.dpi / 72.0
-        r_data = r_points * px_per_point / px_per_data
+        return r_points * px_per_point / px_per_data
     except Exception:
-        r_data = 0.0
-    ux, uy = dx / length, dy / length
-    return ((x0 + ux * r_data, y0 + uy * r_data),
-            (x2 - ux * r_data, y2 - uy * r_data))
+        return 0.0
+
+
+def frame_signed_axes(ax, pos, *, node_size=None, rad=0.0, pad_frac=0.18,
+                      extra_points=None):
+    """Set deterministic limits + equal aspect for a signed-graph figure.
+
+    Self-drawn ``PathPatch`` edges don't update the axes data limits the way
+    networkx's drawing did, so without this the limits hug the node *centers*,
+    clipping the node circles and (with aspect=auto) distorting non-square
+    layouts — e.g. the wide two-faction rectangle collapsing to a strip. We
+    therefore frame the axes explicitly from the node positions, expanded to fit
+    the node circles, the arc bulge (``0.5 * rad * max_chord``), and a small
+    fractional margin; then lock ``aspect='equal'`` and turn autoscale off so
+    bare patches can't drive it.
+
+    ``extra_points`` is an optional iterable of ``(x, y)`` that must also stay in
+    frame — e.g. annotation text a figure draws outside the node bbox (the
+    two-faction "group X / Y" labels). They widen the bbox before padding.
+
+    Call this BEFORE drawing edges, so the shrink transform is stable.
+    """
+    if node_size is None:
+        node_size = GRAPH_STYLE["node_size"]
+    xs = [p[0] for p in pos.values()]
+    ys = [p[1] for p in pos.values()]
+    for ex, ey in (extra_points or []):
+        xs.append(ex)
+        ys.append(ey)
+    if not xs:
+        return
+    minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
+    span = max(maxx - minx, maxy - miny, 1e-6)
+
+    # Provisionally frame on equal aspect so the node-radius transform resolves,
+    # then add the radius + arc bulge + fractional pad and finalize.
+    base_pad = pad_frac * span
+    ax.set_xlim(minx - base_pad, maxx + base_pad)
+    ax.set_ylim(miny - base_pad, maxy + base_pad)
+    ax.set_aspect("equal")
+
+    r_data = _node_radius_data(ax, node_size)
+    max_chord = 0.0
+    pts = list(pos.values())
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            max_chord = max(max_chord, math.hypot(pts[i][0] - pts[j][0],
+                                                  pts[i][1] - pts[j][1]))
+    bulge = 0.5 * abs(rad) * max_chord
+    pad = base_pad + r_data + bulge
+    ax.set_xlim(minx - pad, maxx + pad)
+    ax.set_ylim(miny - pad, maxy + pad)
+    ax.set_aspect("equal")
+    ax.autoscale(False)
+    ax.set_axis_off()
 
 
 def draw_signed_edge(ax, p0, p2, sign, *, rad, color, width, alpha=1.0,
-                     node_size=None, label=True):
+                     node_size=None, node_radius=None, label=True):
     """Draw ONE signed edge as an explicit quadratic Bezier + its sign label.
 
     This is the single source of truth for signed-edge rendering, shared by the
@@ -330,12 +374,26 @@ def draw_signed_edge(ax, p0, p2, sign, *, rad, color, width, alpha=1.0,
     curve (the previous bug chose the label's perpendicular independently of the
     drawn arc). With ``rad == 0``, P1 = M and B(0.5) = M, so this one path also
     renders straight edges with the label centered on the chord.
+
+    ``node_radius`` (data units) shrinks the endpoints toward each other so the
+    curve meets the node borders; if None it is derived from ``node_size`` via
+    the axes transform (call ``frame_signed_axes`` first so it is stable). The
+    shrink is capped so endpoints never cross past the chord midpoint.
     """
     if node_size is None:
         node_size = GRAPH_STYLE["node_size"]
-    # Shrink toward the node borders so the curve meets the circles cleanly.
-    e0, e2 = _shrink_endpoints(ax, p0, p2, node_size)
-    (x0, y0), (x2, y2) = e0, e2
+    (x0, y0), (x2, y2) = p0, p2
+    dx, dy = x2 - x0, y2 - y0
+    length = math.hypot(dx, dy)
+    if node_radius is None:
+        node_radius = _node_radius_data(ax, node_size)
+    if length > 0:
+        # Cap the shrink at 40% of the chord so endpoints stay between nodes.
+        s = min(node_radius, 0.4 * length)
+        ux, uy = dx / length, dy / length
+        x0, y0 = x0 + ux * s, y0 + uy * s
+        x2, y2 = x2 - ux * s, y2 - uy * s
+    e0, e2 = (x0, y0), (x2, y2)
     mx, my = (x0 + x2) / 2.0, (y0 + y2) / 2.0
     dx, dy = x2 - x0, y2 - y0
     length = math.hypot(dx, dy)
@@ -370,8 +428,13 @@ def _draw_signed_edges(G, pos, ax, signed_edges, *, highlight_set, node_size):
 
     Curvature is gated on whether these edges cross: a crossing layout gets
     ``rad = _SIGN_EDGE_RAD``; a non-crossing one stays straight (``rad = 0``).
+    Frames the axes first (deterministic limits + equal aspect) so node circles
+    fit and the shrink transform is stable, then draws every edge with one
+    shared node radius.
     """
     rad = _SIGN_EDGE_RAD if signed_edges_cross(pos, signed_edges) else 0.0
+    frame_signed_axes(ax, pos, node_size=node_size, rad=rad)
+    node_radius = _node_radius_data(ax, node_size)
     for u, v in signed_edges:
         sign = (G.get_edge_data(u, v) or {}).get(_SIGN_KEY)
         highlighted = tuple(sorted((u, v))) in highlight_set
@@ -379,7 +442,8 @@ def _draw_signed_edges(G, pos, ax, signed_edges, *, highlight_set, node_size):
         width = (GRAPH_STYLE["highlight_edge_width"] if highlighted
                  else GRAPH_STYLE["edge_width"])
         draw_signed_edge(ax, pos[u], pos[v], sign, rad=rad,
-                         color=color, width=width, node_size=node_size)
+                         color=color, width=width, node_size=node_size,
+                         node_radius=node_radius)
 
 
 # -----------------------------------------------------------------------------
