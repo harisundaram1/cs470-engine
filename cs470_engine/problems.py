@@ -202,11 +202,34 @@ def render_problem_answer_key(ws, problem: dict) -> None:
     ))
 
 
+def _resolve_figure_path(ws, path: str):
+    """Resolve a figure ``path`` for ``kind: image`` to an existing file.
+
+    Tries, in order: the path as given / relative to cwd; relative to the
+    worksheet YAML's directory and each ancestor (covers a ``figs/...`` path in
+    the dev tree and a flat PL workspace where the image ships beside the YAML);
+    and finally the bare basename beside the YAML. Returns a ``Path`` or None.
+    """
+    from pathlib import Path
+    p = Path(path)
+    candidates = [p, Path.cwd() / p]
+    src = getattr(ws, "source_path", None)
+    if src is not None:
+        src = Path(src)
+        for base in [src.parent, *src.parent.parents]:
+            candidates.append(base / p)
+            candidates.append(base / p.name)  # flat: image beside the YAML
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
 def _render_figure(ws, figure_spec: dict) -> None:
     """Render a YAML figure spec into the current Output context.
 
-    Supports ``kind: graph`` (inline or via ``ref:``). Other kinds print
-    a placeholder note.
+    Supports ``kind: graph`` (inline or via ``ref:``) and ``kind: image`` (a
+    pre-rendered raster via ``path:``). Other kinds print a placeholder note.
     """
     if "ref" in figure_spec:
         name = figure_spec["ref"]
@@ -216,6 +239,24 @@ def _render_figure(ws, figure_spec: dict) -> None:
             return
 
     kind = figure_spec.get("kind", "graph")
+    if kind == "image":
+        path = figure_spec.get("path")
+        resolved = _resolve_figure_path(ws, path) if path else None
+        if resolved is None:
+            print(f"[engine] Figure image not found: {path!r}")
+            return
+        img = plt.imread(str(resolved))
+        # Size the axes to the image aspect; equal aspect + axis off so the
+        # raster is shown undistorted and unframed (no autoscale surprises).
+        h, w = img.shape[0], img.shape[1]
+        fig, ax = plt.subplots(figsize=(5, 5 * h / w if w else 4))
+        ax.imshow(img)
+        ax.set_aspect("equal")
+        ax.set_axis_off()
+        plt.tight_layout()
+        display(fig)
+        plt.close(fig)
+        return
     if kind != "graph":
         print(f"[engine] Figure kind {kind!r} not yet implemented.")
         return
