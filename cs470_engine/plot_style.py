@@ -192,6 +192,11 @@ def apply_default_style():
     rcParams["font.sans-serif"] = ["Helvetica", "Arial", "DejaVu Sans"]
     rcParams["font.family"] = "sans-serif"
     rcParams["axes.unicode_minus"] = False
+    # Math renders in Computer Modern (TeX look) while labels/body stay sans —
+    # mathtext.fontset is independent of font.family, so `$X_i$`, `$2pq$`, etc.
+    # get clean CM math without changing prose typography. Restyles math in every
+    # figure (engine-wide); ships in the Phase B bundle.
+    rcParams["mathtext.fontset"] = "cm"
 
 
 # -----------------------------------------------------------------------------
