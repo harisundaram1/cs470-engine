@@ -32,6 +32,8 @@ import math
 
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
+from matplotlib.patches import PathPatch
+from matplotlib.path import Path as MplPath
 import networkx as nx
 
 
@@ -224,81 +226,160 @@ _SIGN_KEY = "sign"
 _SIGN_POS = "pos"
 _SIGN_NEG = "neg"
 
-#: Gentle, consistent curvature for signed edges so the two members of a
-#: crossing pair (e.g. the A-D / B-C diagonals) bow apart and their sign labels
-#: never overlap. Matches the worksheet module's ``_draw_signed_graph``.
+#: Curvature applied ONLY to figures that have crossing edges, so the two
+#: members of a crossing pair bow apart and their sign labels don't overlap.
+#: Non-crossing layouts (triangles, etc.) stay straight (rad=0).
 _SIGN_EDGE_RAD = 0.22
 
 
-def _sign_label(sign):
+def sign_label(sign):
     """Mathtext sign glyph — ``$-$`` avoids any Helvetica/Unicode fallback."""
     return "$+$" if sign == _SIGN_POS else "$-$"
 
 
-def _sign_color(sign):
+def sign_color(sign):
     """Positive edges navy (primary); negative edges red (bad)."""
     return COLORS["primary"] if sign == _SIGN_POS else COLORS["bad"]
 
 
-def _arc_apex(p_u, p_v, rad):
-    """Apex (t=0.5 point) of matplotlib's ``arc3,rad`` quadratic Bezier.
+# Backward-compatible private aliases (kept so existing imports don't break).
+_sign_label = sign_label
+_sign_color = sign_color
 
-    The control point is the straight midpoint displaced perpendicular to the
-    edge by ``rad * |edge|`` (positive rad bows toward ``(-dy, dx)``), so the
-    apex — where the sign label belongs — is the midpoint displaced by
-    ``(rad / 2) * |edge|`` along that same perpendicular. networkx/matplotlib
-    otherwise place edge labels at the straight midpoint even on curved edges.
+
+def _segments_cross(p1, p2, p3, p4):
+    """True if open segments p1-p2 and p3-p4 properly cross.
+
+    Callers must have already excluded segments that share an endpoint node
+    (adjacent edges), since this works purely on coordinates. Coordinates may be
+    tuples or numpy arrays — only indexing is used.
     """
-    (x1, y1), (x2, y2) = p_u, p_v
-    mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
-    dx, dy = x2 - x1, y2 - y1
+    def orient(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+    d1 = orient(p3, p4, p1)
+    d2 = orient(p3, p4, p2)
+    d3 = orient(p1, p2, p3)
+    d4 = orient(p1, p2, p4)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
+
+
+def signed_edges_cross(pos, edges):
+    """True if any two of the given edges cross when drawn as straight chords.
+
+    ``edges`` is an iterable of ``(u, v)``; ``pos`` maps node -> (x, y) (tuples
+    or numpy arrays). Edges that share an endpoint *node* are adjacent, not
+    crossing, and are skipped by node identity (positions may be unhashable).
+    Used to decide whether to curve signed edges: only crossing layouts need it.
+    """
+    edges = list(edges)
+    for i in range(len(edges)):
+        a, b = edges[i]
+        for j in range(i + 1, len(edges)):
+            c, d = edges[j]
+            if len({a, b, c, d}) < 4:
+                continue  # shared endpoint node — adjacent edges
+            if _segments_cross(pos[a], pos[b], pos[c], pos[d]):
+                return True
+    return False
+
+
+def _shrink_endpoints(ax, p0, p2, node_size):
+    """Pull p0, p2 toward each other by the node radius (in data units).
+
+    ``node_size`` is matplotlib's marker area in points^2; the radius is
+    ``sqrt(node_size / pi)`` points, converted to data units via the axes
+    transform so the drawn curve meets the node borders cleanly.
+    """
+    (x0, y0), (x2, y2) = p0, p2
+    dx, dy = x2 - x0, y2 - y0
     length = math.hypot(dx, dy)
     if length == 0:
-        return mx, my
-    nx_, ny_ = -dy / length, dx / length
-    off = 0.5 * rad * length
-    return mx + nx_ * off, my + ny_ * off
+        return p0, p2
+    r_points = math.sqrt(max(node_size, 0.0) / math.pi)
+    # points -> data units: 1 point = 1/72 inch; figure dpi gives px; transData
+    # maps data->display(px). Invert one data unit's pixel length.
+    try:
+        x_px0, _ = ax.transData.transform((0, 0))
+        x_px1, _ = ax.transData.transform((1, 0))
+        px_per_data = abs(x_px1 - x_px0) or 1.0
+        px_per_point = ax.figure.dpi / 72.0
+        r_data = r_points * px_per_point / px_per_data
+    except Exception:
+        r_data = 0.0
+    ux, uy = dx / length, dy / length
+    return ((x0 + ux * r_data, y0 + uy * r_data),
+            (x2 - ux * r_data, y2 - uy * r_data))
 
 
-def _draw_signed_edges(G, pos, ax, signed_edges, *, highlight_set, node_size):
-    """Draw signed edges with curvature + apex sign labels + sign color.
+def draw_signed_edge(ax, p0, p2, sign, *, rad, color, width, alpha=1.0,
+                     node_size=None, label=True):
+    """Draw ONE signed edge as an explicit quadratic Bezier + its sign label.
 
-    Mirrors the worksheet module's ``_draw_signed_graph`` so concept-cell and
-    question signed graphs look identical. Highlighted signed edges use the
-    Arches highlight color and a thicker stroke.
+    This is the single source of truth for signed-edge rendering, shared by the
+    engine's ``draw_graph`` (question figures) and the worksheet module's
+    ``_draw_signed_graph`` (concept figures), so the two paths cannot drift.
+
+    The control point is owned here:
+        M  = (p0 + p2) / 2
+        n  = unit perpendicular to the chord, (-d_y, d_x) / |d|
+        P1 = M + rad * |d| * n
+    The edge is the quadratic Bezier P0->P1->P2, and the label is placed at that
+    same curve's midpoint B(0.5) = 0.25*P0 + 0.5*P1 + 0.25*P2. Because the draw
+    and the label share the one control point P1, the label is provably on the
+    curve (the previous bug chose the label's perpendicular independently of the
+    drawn arc). With ``rad == 0``, P1 = M and B(0.5) = M, so this one path also
+    renders straight edges with the label centered on the chord.
     """
-    conn = f"arc3,rad={_SIGN_EDGE_RAD}"
-    for u, v in signed_edges:
-        sign = (G.get_edge_data(u, v) or {}).get(_SIGN_KEY)
-        highlighted = tuple(sorted((u, v))) in highlight_set
-        if highlighted:
-            color = COLORS["highlight"]
-            width = GRAPH_STYLE["highlight_edge_width"]
-        else:
-            color = _sign_color(sign)
-            width = GRAPH_STYLE["edge_width"]
-        # arrows=True forces FancyArrowPatches (the LineCollection path silently
-        # ignores connectionstyle); arrowstyle="-" keeps edges headless.
-        nx.draw_networkx_edges(
-            G, pos, ax=ax, edgelist=[(u, v)],
-            edge_color=color, width=width,
-            connectionstyle=conn, arrows=True, arrowstyle="-",
-            node_size=node_size,
-        )
-    # Sign labels at each edge's curved-arc apex.
-    for u, v in signed_edges:
-        sign = (G.get_edge_data(u, v) or {}).get(_SIGN_KEY)
-        lx, ly = _arc_apex(pos[u], pos[v], _SIGN_EDGE_RAD)
-        lab_color = (COLORS["highlight"] if tuple(sorted((u, v))) in highlight_set
-                     else _sign_color(sign))
+    if node_size is None:
+        node_size = GRAPH_STYLE["node_size"]
+    # Shrink toward the node borders so the curve meets the circles cleanly.
+    e0, e2 = _shrink_endpoints(ax, p0, p2, node_size)
+    (x0, y0), (x2, y2) = e0, e2
+    mx, my = (x0 + x2) / 2.0, (y0 + y2) / 2.0
+    dx, dy = x2 - x0, y2 - y0
+    length = math.hypot(dx, dy)
+    if length == 0:
+        p1 = (mx, my)
+    else:
+        nx_, ny_ = -dy / length, dx / length
+        p1 = (mx + rad * length * nx_, my + rad * length * ny_)
+
+    path = MplPath([e0, p1, e2],
+                   [MplPath.MOVETO, MplPath.CURVE3, MplPath.CURVE3])
+    ax.add_patch(PathPatch(path, edgecolor=color, facecolor="none",
+                           linewidth=width, alpha=alpha, zorder=1,
+                           capstyle="round"))
+
+    if label:
+        # B(0.5) of the SAME Bezier — guaranteed on the drawn curve.
+        bx = 0.25 * x0 + 0.5 * p1[0] + 0.25 * x2
+        by = 0.25 * y0 + 0.5 * p1[1] + 0.25 * y2
         ax.text(
-            lx, ly, _sign_label(sign),
+            bx, by, sign_label(sign),
             ha="center", va="center",
             fontsize=GRAPH_STYLE["label_font_size"],
-            color=lab_color,
+            color=color, alpha=alpha,
             bbox=dict(boxstyle="circle,pad=0.12", fc="white", ec="none"),
             zorder=4,
         )
+
+
+def _draw_signed_edges(G, pos, ax, signed_edges, *, highlight_set, node_size):
+    """Draw a set of signed edges via the shared ``draw_signed_edge`` helper.
+
+    Curvature is gated on whether these edges cross: a crossing layout gets
+    ``rad = _SIGN_EDGE_RAD``; a non-crossing one stays straight (``rad = 0``).
+    """
+    rad = _SIGN_EDGE_RAD if signed_edges_cross(pos, signed_edges) else 0.0
+    for u, v in signed_edges:
+        sign = (G.get_edge_data(u, v) or {}).get(_SIGN_KEY)
+        highlighted = tuple(sorted((u, v))) in highlight_set
+        color = COLORS["highlight"] if highlighted else sign_color(sign)
+        width = (GRAPH_STYLE["highlight_edge_width"] if highlighted
+                 else GRAPH_STYLE["edge_width"])
+        draw_signed_edge(ax, pos[u], pos[v], sign, rad=rad,
+                         color=color, width=width, node_size=node_size)
 
 
 # -----------------------------------------------------------------------------
