@@ -29,6 +29,7 @@ Aesthetic rules (enforced by scripts/validate.py)
 """
 
 import math
+import re
 
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
@@ -230,6 +231,27 @@ _SIGN_NEG = "neg"
 #: members of a crossing pair bow apart and their sign labels don't overlap.
 #: Non-crossing layouts (triangles, etc.) stay straight (rad=0).
 _SIGN_EDGE_RAD = 0.22
+
+
+#: A bare letter followed by digits, e.g. ``m2`` / ``f1`` — the only node-label
+#: shape we turn into a subscript. Strictly guarded: plain letters (``A``),
+#: bare digits (``5``), names (``Claire``), and existing mathtext (``X_i``,
+#: ``A_{ij}``, ``Y_i(t)`` — all contain ``_``, ``{`` or ``(``) never match.
+_SUBSCRIPT_LABEL_RE = re.compile(r"^([A-Za-z])(\d+)$")
+
+
+def subscript_label(text):
+    """Format a ``letter+digits`` node id as mathtext ``$letter_{digits}$``.
+
+    ``m2 -> $m_2$``, ``f1 -> $f_1$``. Anything not matching ``^[A-Za-z]\\d+$``
+    (single letters, bare digits, names, already-mathtext labels) is returned
+    unchanged, so this is safe to apply to every node label by default.
+    """
+    s = str(text)
+    m = _SUBSCRIPT_LABEL_RE.match(s)
+    if not m:
+        return s
+    return f"${m.group(1)}_{{{m.group(2)}}}$"
 
 
 def sign_label(sign):
@@ -601,8 +623,11 @@ def draw_graph(
         )
 
     if show_labels:
+        # Format letter+digit ids as subscripts (m2 -> $m_2$); all other labels
+        # (plain letters, digits, names) pass through unchanged.
+        labels = {n: subscript_label(n) for n in G.nodes()}
         nx.draw_networkx_labels(
-            G, pos, ax=ax,
+            G, pos, ax=ax, labels=labels,
             font_family=GRAPH_STYLE["label_font_family"],
             font_size=GRAPH_STYLE["label_font_size"],
         )
