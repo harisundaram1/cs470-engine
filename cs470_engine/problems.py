@@ -261,14 +261,27 @@ def _render_figure(ws, figure_spec: dict) -> None:
         print(f"[engine] Figure kind {kind!r} not yet implemented.")
         return
 
-    from .plot_style import draw_graph, apply_ax_style
+    from .plot_style import draw_graph, draw_directed_graph, apply_ax_style
 
-    G = nx.Graph()
+    directed = bool(figure_spec.get("directed"))
+
+    # Per-node label map (id -> LaTeX/text) and explicit positions, when the
+    # YAML supplies them. Both are optional; absent => raw id / computed layout.
+    label_map = {}
+    fixed_pos = {}
+    node_ids = []
     for n in figure_spec.get("nodes") or []:
         if isinstance(n, dict):
-            G.add_node(n["id"])
+            node_ids.append(n["id"])
+            if "label" in n:
+                label_map[n["id"]] = n["label"]
+            if "pos" in n:
+                fixed_pos[n["id"]] = tuple(n["pos"])
         else:
-            G.add_node(n)
+            node_ids.append(n)
+
+    G = (nx.DiGraph() if directed else nx.Graph())
+    G.add_nodes_from(node_ids)
     for e in figure_spec.get("edges") or []:
         if isinstance(e, list):
             if len(e) >= 3 and isinstance(e[2], dict):
@@ -278,7 +291,9 @@ def _render_figure(ws, figure_spec: dict) -> None:
 
     layout = figure_spec.get("layout", "spring")
     seed = figure_spec.get("layout_seed", 42)
-    if layout == "circular":
+    if fixed_pos and len(fixed_pos) == len(node_ids):
+        pos = fixed_pos                      # fully-specified curated layout
+    elif layout == "circular":
         pos = nx.circular_layout(G)
     elif layout == "kamada_kawai":
         pos = nx.kamada_kawai_layout(G)
@@ -286,7 +301,12 @@ def _render_figure(ws, figure_spec: dict) -> None:
         pos = nx.spring_layout(G, seed=seed)
 
     fig, ax = plt.subplots(figsize=(5, 4))
-    draw_graph(G, ax, pos=pos)
+    if directed:
+        # Directed causal-graph figures (e.g. the Shalizi-Thomas DAG): arrowheads
+        # + LaTeX label map + curated positions, matching the module-drawn DAG.
+        draw_directed_graph(G, ax, pos=pos, labels=label_map or None)
+    else:
+        draw_graph(G, ax, pos=pos)
     apply_ax_style(ax)
     plt.tight_layout()
     display(fig)

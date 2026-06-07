@@ -474,6 +474,54 @@ def _draw_signed_edges(G, pos, ax, signed_edges, *, highlight_set, node_size):
 
 
 # -----------------------------------------------------------------------------
+# Directed-graph (causal DAG) rendering helper
+# -----------------------------------------------------------------------------
+
+#: Node size + label font for directed causal-graph figures, tuned so wide
+#: LaTeX labels (e.g. $Y_j(t-1)$) sit inside the circles. Shared by the engine's
+#: figure path and worksheet concept DAGs so they render identically.
+DAG_NODE_SIZE = 2000
+DAG_LABEL_FONTSIZE = 8.5
+
+
+def draw_directed_graph(G, ax, *, pos, labels=None, node_size=None,
+                        highlight_edges=None, highlight_color=None):
+    """Draw a directed graph as a causal DAG: arrowheads, labels inside nodes.
+
+    Open-circle nodes (sized for their labels), navy directed edges with
+    arrowheads, optional LaTeX ``labels`` map (id -> text), optional
+    ``highlight_edges`` drawn in the accent/given color. Frames the axes from the
+    node positions with margin (no autoscale-to-patches) and sets equal aspect.
+    """
+    node_size = node_size or DAG_NODE_SIZE
+    highlight = {tuple(e) for e in (highlight_edges or [])}
+    hl_color = highlight_color or COLORS["accent"]
+
+    frame_signed_axes(ax, pos, node_size=node_size, rad=0.0)
+
+    for u, v in G.edges():
+        is_hl = (u, v) in highlight
+        nx.draw_networkx_edges(
+            G, pos, edgelist=[(u, v)], ax=ax,
+            edge_color=hl_color if is_hl else GRAPH_STYLE["edge_color"],
+            width=2.6 if is_hl else 1.4,
+            arrows=True, arrowstyle="-|>", arrowsize=16,
+            node_size=node_size, min_source_margin=15, min_target_margin=15,
+        )
+    nx.draw_networkx_nodes(
+        G, pos, ax=ax, node_size=node_size,
+        node_color=GRAPH_STYLE["node_fill"],
+        edgecolors=GRAPH_STYLE["node_edge_color"],
+        linewidths=GRAPH_STYLE["node_edge_width"],
+    )
+    nx.draw_networkx_labels(
+        G, pos, labels=labels, ax=ax,
+        font_size=DAG_LABEL_FONTSIZE, font_color=COLORS["text"],
+    )
+    ax.set_axis_off()
+
+
+# -----------------------------------------------------------------------------
 # Graph rendering helper
 # -----------------------------------------------------------------------------
 
