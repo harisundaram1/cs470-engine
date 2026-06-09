@@ -225,6 +225,44 @@ def _resolve_figure_path(ws, path: str):
     return None
 
 
+def _render_payoff_matrix(figure_spec: dict) -> None:
+    """Render a ``kind: payoff_matrix`` figure spec.
+
+    Reads the spec's matrix data and (optional) ``highlight`` mode, then calls
+    ``plot_style.draw_payoff_matrix`` — which COMPUTES best responses / Nash /
+    dominance from the payoffs, so the overlay can't drift from the answer key.
+    Cell payoffs come from ``payoffs`` (n x m of ``[p_row, p_col]``).
+    """
+    from .plot_style import draw_payoff_matrix, PAYOFF_STYLE
+
+    payoffs = figure_spec.get("payoffs") or []
+    n = len(payoffs)
+    m = len(payoffs[0]) if n else 0
+    if n == 0 or m == 0:
+        print("[engine] payoff_matrix figure has no `payoffs` data.")
+        return
+    # Normalize each cell to a (p_row, p_col) tuple (YAML lists -> tuples).
+    payoffs = [[tuple(cell) for cell in row] for row in payoffs]
+
+    st = PAYOFF_STYLE
+    figsize = (st["margin_in"] + m * st["cell_size_in"],
+               st["margin_in"] + n * st["cell_size_in"])
+    fig, ax = plt.subplots(figsize=figsize)
+    draw_payoff_matrix(
+        ax, payoffs,
+        row_player=figure_spec.get("row_player", "Player 1"),
+        col_player=figure_spec.get("col_player", "Player 2"),
+        row_strategies=figure_spec.get("row_strategies"),
+        col_strategies=figure_spec.get("col_strategies"),
+        highlight=figure_spec.get("highlight", "none"),
+        against=figure_spec.get("against"),
+        note=figure_spec.get("note"),
+    )
+    plt.tight_layout()
+    display(fig)
+    plt.close(fig)
+
+
 def _render_figure(ws, figure_spec: dict) -> None:
     """Render a YAML figure spec into the current Output context.
 
@@ -256,6 +294,9 @@ def _render_figure(ws, figure_spec: dict) -> None:
         plt.tight_layout()
         display(fig)
         plt.close(fig)
+        return
+    if kind == "payoff_matrix":
+        _render_payoff_matrix(figure_spec)
         return
     if kind != "graph":
         print(f"[engine] Figure kind {kind!r} not yet implemented.")

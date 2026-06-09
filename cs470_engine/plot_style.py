@@ -690,6 +690,388 @@ def draw_graph(
 
 
 # -----------------------------------------------------------------------------
+# Payoff-matrix game-theory helpers (Lesson 2)
+# -----------------------------------------------------------------------------
+#
+# A payoff matrix is an n x m grid; each cell is a (row_player, col_player)
+# payoff pair. We store it as ``payoffs[i][j] = (p_row, p_col)`` with row i a
+# row-player strategy and column j a column-player strategy — matching the
+# Easley-Kleinberg convention (row-player payoff listed first in each box).
+#
+# These COMPUTE helpers are the single source of truth for best responses,
+# pure Nash equilibria, and strict-dominance deletion. The renderer below and
+# the Stage-2 ipywidgets wrappers both call them, so a highlighted figure can
+# never drift from the answer key — the highlight IS the computation.
+#
+# Best-response / Nash use WEAK comparison (``>=``) so tie-induced equilibria
+# are caught. Dominated-strategy deletion uses STRICT comparison (``>``),
+# matching the textbook's "strictly dominated."
+
+#: Game-theory figure styling. Kept here (no inline literals in render code).
+PAYOFF_STYLE = {
+    "cell_size_in":     1.15,   # per-cell side length (inches), pre-margin
+    "margin_in":        0.95,   # left/top margin for player + strategy labels
+    "payoff_fontsize":  13,
+    "strategy_fontsize": 12,
+    "player_fontsize":  12,
+    "grid_color":       COLORS["primary"],
+    "grid_width":       1.3,
+    "br_color":         COLORS["highlight"],   # best-response underline (Arches)
+    "nash_fill":        COLORS["highlight"],    # NE cell tint
+    "nash_fill_alpha":  0.16,
+    "nash_edge":        COLORS["primary"],
+    "deleted_alpha":    0.28,    # struck-out (deleted) row/col fade
+    "deleted_color":    COLORS["bad"],
+}
+
+
+def _payoff_value(payoffs, i, j, player):
+    """One player's payoff in cell (i, j). ``player`` is 0 (row) or 1 (col)."""
+    return payoffs[i][j][player]
+
+
+def best_responses(payoffs, player):
+    """Cells that are a WEAK best response for ``player`` (0 row, 1 col).
+
+    For the row player (0): in each column j, every row i whose row-payoff
+    equals the column's maximum row-payoff. For the col player (1): in each
+    row i, every column j whose col-payoff equals that row's maximum
+    col-payoff. Returns a set of ``(i, j)`` tuples. Weak (``>=``) so ties are
+    all included — required to catch tie-induced Nash equilibria.
+    """
+    n = len(payoffs)
+    m = len(payoffs[0]) if n else 0
+    cells = set()
+    if player == 0:
+        for j in range(m):
+            best = max(_payoff_value(payoffs, i, j, 0) for i in range(n))
+            for i in range(n):
+                if _payoff_value(payoffs, i, j, 0) == best:
+                    cells.add((i, j))
+    else:
+        for i in range(n):
+            best = max(_payoff_value(payoffs, i, j, 1) for j in range(m))
+            for j in range(m):
+                if _payoff_value(payoffs, i, j, 1) == best:
+                    cells.add((i, j))
+    return cells
+
+
+def pure_nash(payoffs):
+    """Pure-strategy Nash equilibria as a sorted list of ``(i, j)`` cells.
+
+    A cell is a pure NE iff the row strategy is a weak best response in its
+    column AND the column strategy is a weak best response in its row — i.e.
+    the cell is in both players' best-response sets. Weak comparison means a
+    tie-induced equilibrium (e.g. a player indifferent between two columns)
+    is correctly reported as a Nash equilibrium.
+    """
+    br_row = best_responses(payoffs, 0)
+    br_col = best_responses(payoffs, 1)
+    return sorted(br_row & br_col)
+
+
+def strictly_dominated(payoffs, player, *, rows=None, cols=None):
+    """Indices of ``player``'s STRICTLY dominated strategies in a subgame.
+
+    ``rows`` / ``cols`` restrict attention to a surviving submatrix (the
+    indices still in play); default = all. A row i is strictly dominated if
+    some other surviving row k beats it (``>``) in EVERY surviving column; a
+    column j is strictly dominated if some other surviving column beats it in
+    every surviving row. Returns a sorted list of strategy indices (row
+    indices for player 0, column indices for player 1).
+    """
+    n = len(payoffs)
+    m = len(payoffs[0]) if n else 0
+    rows = list(range(n)) if rows is None else list(rows)
+    cols = list(range(m)) if cols is None else list(cols)
+    dominated = []
+    if player == 0:
+        for i in rows:
+            for k in rows:
+                if k == i:
+                    continue
+                if all(_payoff_value(payoffs, k, j, 0)
+                       > _payoff_value(payoffs, i, j, 0) for j in cols):
+                    dominated.append(i)
+                    break
+    else:
+        for j in cols:
+            for k in cols:
+                if k == j:
+                    continue
+                if all(_payoff_value(payoffs, i, k, 1)
+                       > _payoff_value(payoffs, i, j, 1) for i in rows):
+                    dominated.append(j)
+                    break
+    return sorted(dominated)
+
+
+def iterated_deletion(payoffs):
+    """Iterated deletion of STRICTLY dominated strategies.
+
+    Repeatedly removes any strictly dominated row or column from the surviving
+    submatrix until none remain. Returns a list of *steps*; each step is a
+    dict ``{"rows": [...], "cols": [...], "deleted_rows": [...],
+    "deleted_cols": [...]}`` giving the surviving indices BEFORE the deletion
+    and the indices deleted at that step. The final entry has empty
+    ``deleted_*`` and records the surviving submatrix. Order-independent for
+    strict dominance, so the sequence is deterministic here (rows then cols
+    each round); the surviving set is what matters.
+    """
+    n = len(payoffs)
+    m = len(payoffs[0]) if n else 0
+    rows = list(range(n))
+    cols = list(range(m))
+    steps = []
+    while True:
+        dr = strictly_dominated(payoffs, 0, rows=rows, cols=cols)
+        dc = strictly_dominated(payoffs, 1, rows=rows, cols=cols)
+        steps.append({
+            "rows": list(rows), "cols": list(cols),
+            "deleted_rows": list(dr), "deleted_cols": list(dc),
+        })
+        if not dr and not dc:
+            break
+        rows = [i for i in rows if i not in dr]
+        cols = [j for j in cols if j not in dc]
+    return steps
+
+
+def expected_payoff_lines(payoffs, player, *, against_strategy=0):
+    """Each of ``player``'s pure strategies' expected payoff vs an opponent mix.
+
+    The opponent mixes over their two strategies with probability ``q`` on
+    column index ``against_strategy`` (default 0) and ``1 - q`` on the other.
+    Requires the opponent to have exactly two strategies (the indifference /
+    mixed-equilibrium setting). Returns ``{strategy_index: (a, b)}`` where the
+    expected payoff of that strategy is the line ``a*q + b``. For the row
+    player this reads the row-payoff column; the geometry is the two H/T lines
+    of Matching Pennies, etc.
+    """
+    n = len(payoffs)
+    m = len(payoffs[0]) if n else 0
+    lines = {}
+    if player == 0:
+        if m != 2:
+            raise ValueError("expected_payoff_lines(player=0) needs a 2-column "
+                             "opponent (the mixing player).")
+        other = 1 - against_strategy
+        for i in range(n):
+            v_q = _payoff_value(payoffs, i, against_strategy, 0)
+            v_o = _payoff_value(payoffs, i, other, 0)
+            # E = q*v_q + (1-q)*v_o = (v_q - v_o)*q + v_o
+            lines[i] = (v_q - v_o, v_o)
+    else:
+        if n != 2:
+            raise ValueError("expected_payoff_lines(player=1) needs a 2-row "
+                             "opponent (the mixing player).")
+        other = 1 - against_strategy
+        for j in range(m):
+            v_q = _payoff_value(payoffs, against_strategy, j, 1)
+            v_o = _payoff_value(payoffs, other, j, 1)
+            lines[j] = (v_q - v_o, v_o)
+    return lines
+
+
+def indifference_crossing(line_a, line_b):
+    """Solve ``a1*q + b1 == a2*q + b2`` for the crossing ``q``.
+
+    Each line is ``(slope, intercept)``. Returns ``q`` in principle anywhere on
+    the real line (callers check it lies in [0, 1]); returns None if the lines
+    are parallel (no unique crossing). For Matching Pennies' E[H]=1-2q and
+    E[T]=2q-1 this returns q = 1/2.
+    """
+    a1, b1 = line_a
+    a2, b2 = line_b
+    denom = a1 - a2
+    if denom == 0:
+        return None
+    return (b2 - b1) / denom
+
+
+def draw_payoff_matrix(
+    ax,
+    payoffs,
+    *,
+    row_player="Player 1",
+    col_player="Player 2",
+    row_strategies=None,
+    col_strategies=None,
+    highlight="none",
+    against=None,
+    note=None,
+):
+    """Draw an n x m payoff matrix in the project's Tufte style.
+
+    ``payoffs[i][j] = (p_row, p_col)`` — the row-player payoff is listed first
+    in each cell, per the Easley-Kleinberg convention. The matrix is drawn as a
+    clean grid with the two players' strategy labels on the margins and each
+    cell's ``$(p_1, p_2)$`` typeset in mathtext.
+
+    ``highlight`` selects an analysis overlay, all COMPUTED from ``payoffs``:
+
+    - ``"none"``      — plain matrix.
+    - ``"best_response"`` — underline each player's weak best-response payoff.
+      With ``against={"player": "col"|0|1, "strategy": <idx or label>}`` only
+      that player's best responses (in the fixed opponent context) are marked;
+      otherwise both players' best responses are shown.
+    - ``"nash"``      — tint every pure-NE cell (mutual weak best response) and
+      box it; tie-induced NE are included.
+    - ``"deletion"``  — iterated deletion of STRICTLY dominated strategies:
+      struck-out (faded, line-through) rows/cols are those deleted across all
+      rounds; the surviving submatrix is left at full strength. (A per-round
+      stepper is a Stage-2 widget concern; this static form shows the end
+      state with every deleted strategy marked.)
+
+    Returns the (rows, cols) surviving indices for ``deletion`` (else None),
+    so callers can chain. Pure compute lives in the helpers above; this only
+    draws.
+    """
+    n = len(payoffs)
+    m = len(payoffs[0]) if n else 0
+    if n == 0 or m == 0:
+        ax.set_axis_off()
+        return None
+    row_strategies = row_strategies or [str(i) for i in range(n)]
+    col_strategies = col_strategies or [str(j) for j in range(m)]
+
+    st = PAYOFF_STYLE
+
+    # Coordinate frame: cell (i, j) occupies the unit square with top-left at
+    # (j, -i) so row 0 is on top and column 0 on the left (reading order).
+    ax.set_xlim(-1.0, m)
+    ax.set_ylim(-n, 1.0)
+    ax.set_aspect("equal")
+    ax.autoscale(False)
+    ax.set_axis_off()
+
+    # --- analysis overlays (computed) -------------------------------------
+    br_cells = set()
+    nash_cells = set()
+    deleted_rows, deleted_cols = set(), set()
+    surviving = None
+    if highlight == "best_response":
+        if against is None:
+            br_cells = best_responses(payoffs, 0) | best_responses(payoffs, 1)
+        else:
+            who = against.get("player")
+            who = 0 if who in (0, "row") else 1
+            # Restrict to the named opponent context (a fixed opponent strategy).
+            br_all = best_responses(payoffs, who)
+            strat = against.get("strategy")
+            if strat is not None:
+                if who == 0:
+                    # opponent is the col player fixing a column
+                    jdx = (col_strategies.index(strat)
+                           if strat in col_strategies else strat)
+                    br_cells = {(i, j) for (i, j) in br_all if j == jdx}
+                else:
+                    idx = (row_strategies.index(strat)
+                           if strat in row_strategies else strat)
+                    br_cells = {(i, j) for (i, j) in br_all if i == idx}
+            else:
+                br_cells = br_all
+    elif highlight == "nash":
+        nash_cells = set(pure_nash(payoffs))
+    elif highlight == "deletion":
+        steps = iterated_deletion(payoffs)
+        for s in steps:
+            deleted_rows.update(s["deleted_rows"])
+            deleted_cols.update(s["deleted_cols"])
+        surviving = (steps[-1]["rows"], steps[-1]["cols"])
+
+    def _faded(i, j):
+        return i in deleted_rows or j in deleted_cols
+
+    # --- cells ------------------------------------------------------------
+    from matplotlib.patches import Rectangle
+    for i in range(n):
+        for j in range(m):
+            x0, y0 = j, -i            # top-left of the cell
+            faded = _faded(i, j)
+            alpha = st["deleted_alpha"] if faded else 1.0
+            if (i, j) in nash_cells:
+                ax.add_patch(Rectangle(
+                    (x0, y0 - 1), 1, 1,
+                    facecolor=st["nash_fill"], alpha=st["nash_fill_alpha"],
+                    edgecolor=st["nash_edge"], linewidth=st["grid_width"] + 0.6,
+                    zorder=0.5,
+                ))
+            p_row, p_col = payoffs[i][j]
+            txt = _format_pair(p_row, p_col)
+            ax.text(
+                x0 + 0.5, y0 - 0.5, txt,
+                ha="center", va="center",
+                fontsize=st["payoff_fontsize"], color=COLORS["text"],
+                alpha=alpha, zorder=3,
+            )
+            # best-response underline: mark the maximizing player's payoff(s)
+            if (i, j) in br_cells:
+                ax.plot(
+                    [x0 + 0.18, x0 + 0.82], [y0 - 0.72, y0 - 0.72],
+                    color=st["br_color"], linewidth=2.4, zorder=2,
+                    solid_capstyle="round",
+                )
+
+    # --- grid lines -------------------------------------------------------
+    for j in range(m + 1):
+        ax.plot([j, j], [-n, 0], color=st["grid_color"],
+                linewidth=st["grid_width"], zorder=1)
+    for i in range(n + 1):
+        ax.plot([0, m], [-i, -i], color=st["grid_color"],
+                linewidth=st["grid_width"], zorder=1)
+
+    # --- strategy labels --------------------------------------------------
+    for j in range(m):
+        faded = j in deleted_cols
+        ax.text(j + 0.5, 0.18, str(col_strategies[j]),
+                ha="center", va="bottom", fontsize=st["strategy_fontsize"],
+                color=COLORS["text"],
+                alpha=st["deleted_alpha"] if faded else 1.0,
+                zorder=3)
+        if faded:   # strike-through on a deleted column label
+            ax.plot([j + 0.2, j + 0.8], [0.30, 0.30],
+                    color=st["deleted_color"], linewidth=1.6, zorder=4)
+    for i in range(n):
+        faded = i in deleted_rows
+        ax.text(-0.18, -i - 0.5, str(row_strategies[i]),
+                ha="right", va="center", fontsize=st["strategy_fontsize"],
+                color=COLORS["text"],
+                alpha=st["deleted_alpha"] if faded else 1.0,
+                zorder=3)
+        if faded:
+            ax.plot([-0.55, -0.05], [-i - 0.5, -i - 0.5],
+                    color=st["deleted_color"], linewidth=1.6, zorder=4)
+
+    # --- player names -----------------------------------------------------
+    ax.text(m / 2.0, 0.62, str(col_player), ha="center", va="bottom",
+            fontsize=st["player_fontsize"], color=COLORS["primary"],
+            fontweight="bold", zorder=3)
+    ax.text(-0.72, -n / 2.0, str(row_player), ha="center", va="center",
+            rotation=90, fontsize=st["player_fontsize"],
+            color=COLORS["primary"], fontweight="bold", zorder=3)
+
+    if note:
+        ax.text(m / 2.0, -n - 0.25, str(note), ha="center", va="top",
+                fontsize=st["strategy_fontsize"] - 1, color=COLORS["text"],
+                zorder=3)
+
+    return surviving
+
+
+def _format_pair(p_row, p_col):
+    """Format a payoff pair as mathtext ``$(a,\\ b)$`` (no Unicode minus)."""
+    def fmt(v):
+        # Render ints without trailing .0; keep floats compact.
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        s = f"{v}"
+        return s.replace("-", "{-}")   # mathtext minus, avoids font fallback
+    return f"$({fmt(p_row)},\\ {fmt(p_col)})$"
+
+
+# -----------------------------------------------------------------------------
 # Annotation helper for missing/forbidden edges
 # -----------------------------------------------------------------------------
 
