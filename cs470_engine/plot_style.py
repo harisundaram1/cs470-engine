@@ -1072,6 +1072,398 @@ def _format_pair(p_row, p_col):
 
 
 # -----------------------------------------------------------------------------
+# Auction helpers + renderers (Lesson 3)
+# -----------------------------------------------------------------------------
+#
+# Lesson 3 (Auctions, c9) has essentially no source figures, so these renderers
+# ARE the figures. Same discipline as the Lesson-2 payoff-matrix work: the
+# winner / price / payoff / optimum is COMPUTED from the bid/value data by the
+# helpers below, and the renderers + Stage-2 widgets both call them — so a
+# figure can never drift from the answer key.
+#
+# Conventions: a sealed-bid auction is a list of submitted ``bids``; the winner
+# is the highest bid (ties -> lowest index, deterministic). First-price: the
+# winner pays their own bid. Second-price (Vickrey): the winner pays the
+# second-highest bid (or ``max(second_bid, reserve)`` with a reserve). A payoff
+# is ``value - price`` if you win, else 0.
+
+#: Auction figure styling. Centralized — no inline literals in render code.
+AUCTION_STYLE = {
+    # table
+    "row_height_in":   0.52,
+    "col_width_in":    1.02,
+    "margin_in":       0.55,
+    "header_fontsize": 12,
+    "cell_fontsize":   12,
+    "rule_color":      COLORS["primary"],
+    "rule_width":      1.4,
+    "thin_rule_width": 0.7,
+    "winner_fill":     COLORS["highlight"],
+    "winner_fill_alpha": 0.16,
+    "price_color":     COLORS["accent"],
+    # curves
+    "curve_color":     COLORS["primary"],
+    "curve_width":     2.2,
+    "optimum_color":   COLORS["highlight"],
+    "truthful_color":  COLORS["good"],
+    "marker_color":    COLORS["accent"],
+    "guide_color":     COLORS["minor_tick"],
+    "guide_width":     1.0,
+    # common-value strip
+    "common_value_color": COLORS["primary"],
+    "estimate_color":     COLORS["tertiary"],
+    "curse_color":        COLORS["bad"],
+    "axis_fontsize":   11,
+    "annot_fontsize":  10,
+}
+
+
+def _fmt_num(v):
+    """Compact mathtext number: int when integral, else up to 3 decimals,
+    mathtext minus to avoid a Unicode-minus font fallback."""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    s = f"{v:.3f}".rstrip("0").rstrip(".") if isinstance(v, float) else f"{v}"
+    return s.replace("-", "{-}")
+
+
+# --- compute helpers (single source of truth) --------------------------------
+
+def auction_outcome(bids, *, fmt="second_price", reserve=None):
+    """Winner index + price for a sealed-bid auction, computed from ``bids``.
+
+    ``fmt`` is ``"first_price"`` (winner pays own bid) or ``"second_price"``
+    (winner pays the second-highest bid). The highest bid wins; ties break to
+    the lowest index (deterministic). With a ``reserve``, the item is unsold if
+    the top bid is below it; otherwise second-price pays ``max(second, reserve)``
+    and first-price pays the winner's own bid. Returns
+    ``{"winner": idx|None, "price": float|None, "sold": bool}``.
+    """
+    if not bids:
+        return {"winner": None, "price": None, "sold": False}
+    winner = max(range(len(bids)), key=lambda i: (bids[i], -i))
+    top = bids[winner]
+    others = [b for k, b in enumerate(bids) if k != winner]
+    second = max(others) if others else 0.0
+    if reserve is not None and top < reserve:
+        return {"winner": None, "price": None, "sold": False}
+    if fmt == "first_price":
+        price = top
+    else:
+        price = second if reserve is None else max(second, reserve)
+    return {"winner": winner, "price": float(price), "sold": True}
+
+
+def bid_payoff(value, bid, others, *, fmt="second_price", reserve=None):
+    """Your payoff bidding ``bid`` (true value ``value``) against ``others``.
+
+    You are bidder 0 in the combined vector ``[bid] + others``. If you win, your
+    payoff is ``value - price`` (price per ``auction_outcome``/``fmt``); if you
+    lose, 0. The engine, not the author, decides whether you win — so a
+    truthfulness/shading figure can't disagree with the math.
+    """
+    out = auction_outcome([bid] + list(others), fmt=fmt, reserve=reserve)
+    if out["winner"] == 0:
+        return float(value) - out["price"]
+    return 0.0
+
+
+def optimal_reserve(seller_value):
+    """Optimal second-price reserve for one bidder with value ~ U(0,1):
+    ``(1 + v)/2`` (maximizes ``v*r + r*(1-r)``)."""
+    return (1.0 + seller_value) / 2.0
+
+
+def reserve_revenue(r, seller_value):
+    """Expected seller revenue at reserve ``r`` (one bidder, value ~ U(0,1)):
+    ``v*r + r*(1-r)`` — kept the item (value ``v``) w.p. ``r``, else gets ``r``."""
+    return seller_value * r + r * (1.0 - r)
+
+
+def second_price_revenue_binary(n):
+    """Expected second-price revenue, ``n`` i.i.d. bidders with value in {0,1}
+    each w.p. 1/2. Revenue is 1 iff at least two bidders have value 1 (the
+    second-highest value is then 1); the count of such outcomes is
+    ``2**n - n - 1``, so the expectation is ``(2**n - n - 1) / 2**n``."""
+    return (2 ** n - n - 1) / (2 ** n)
+
+
+def equilibrium_shade(value, n):
+    """First-price symmetric-equilibrium bid for values ~ U(0,1) and ``n``
+    bidders: ``(n-1)/n * value``. (n=2 gives the ``v/2`` "shade by half".)"""
+    return (n - 1) / n * value
+
+
+def _win_prob_first_price(bid, n):
+    """P(win) for bidder 0 bidding ``bid`` when the ``n-1`` opponents play the
+    symmetric equilibrium ``s(v)=(n-1)/n v`` with values ~ U(0,1). An opponent's
+    bid is below ``bid`` iff their value is below ``bid/c`` with ``c=(n-1)/n``,
+    so P(win) = ``min(1, bid/c)**(n-1)``."""
+    if n <= 1:
+        return 1.0
+    c = (n - 1) / n
+    per = min(1.0, max(0.0, bid / c)) if c > 0 else (1.0 if bid > 0 else 0.0)
+    return per ** (n - 1)
+
+
+# --- renderer A: auction outcome table ---------------------------------------
+
+def draw_auction_table(ax, *, bids, values=None, fmt="second_price",
+                       reserve=None, labels=None, note=None):
+    """Render an auction outcome table; winner + price + payoff COMPUTED.
+
+    One row per bidder with columns Bidder / Value / Bid / Wins / Pays /
+    Payoff. ``bids`` decides the outcome; ``values`` (default = ``bids``, i.e.
+    truthful bidding) feeds the payoff column. The winning row is tinted and its
+    price marked. Booktabs-style (top/header/bottom rules, no vertical lines).
+    """
+    bids = [float(b) for b in bids]
+    n = len(bids)
+    if n == 0:
+        ax.set_axis_off()
+        return None
+    values = [float(v) for v in (values if values is not None else bids)]
+    labels = labels or [f"B{i + 1}" for i in range(n)]
+    out = auction_outcome(bids, fmt=fmt, reserve=reserve)
+    st = AUCTION_STYLE
+
+    cols = ["Bidder", "Value", "Bid", "Wins", "Pays", "Payoff"]
+    ncol = len(cols)
+    # x-centers; first column a touch wider visually but uniform cells keep it
+    # simple and aligned.
+    ax.set_xlim(0, ncol)
+    ax.set_ylim(-(n + 1), 0)
+    ax.set_aspect("auto")
+    ax.autoscale(False)
+    ax.set_axis_off()
+
+    from matplotlib.patches import Rectangle
+
+    # winner row tint (row index = winner+1 because row 0 is the header)
+    if out["sold"] and out["winner"] is not None:
+        wr = out["winner"]
+        ax.add_patch(Rectangle((0, -(wr + 2)), ncol, 1,
+                               facecolor=st["winner_fill"],
+                               alpha=st["winner_fill_alpha"],
+                               edgecolor="none", zorder=0))
+
+    # header
+    for c, name in enumerate(cols):
+        ax.text(c + 0.5, -0.5, name, ha="center", va="center",
+                fontsize=st["header_fontsize"], fontweight="bold",
+                color=COLORS["primary"])
+
+    # rows
+    for i in range(n):
+        y = -(i + 1.5)
+        won = (out["winner"] == i and out["sold"])
+        pays = _fmt_num(out["price"]) if won else "$-$"
+        payoff = (values[i] - out["price"]) if won else 0.0
+        cells = [labels[i], _fmt_num(values[i]), _fmt_num(bids[i]),
+                 ("yes" if won else "no"), pays, _fmt_num(payoff)]
+        for c, txt in enumerate(cells):
+            color = st["price_color"] if (won and c == 4) else COLORS["text"]
+            ax.text(c + 0.5, y, txt, ha="center", va="center",
+                    fontsize=st["cell_fontsize"], color=color)
+
+    # booktabs rules
+    for yy, w in [(0, st["rule_width"]), (-1, st["thin_rule_width"]),
+                  (-(n + 1), st["rule_width"])]:
+        ax.plot([0, ncol], [yy, yy], color=st["rule_color"], linewidth=w,
+                zorder=2)
+
+    fmt_label = "second-price" if fmt == "second_price" else "first-price"
+    sub = f"{fmt_label} auction"
+    if reserve is not None:
+        sub += f", reserve $r={_fmt_num(reserve)}$"
+    if not out["sold"]:
+        sub += " — unsold (top bid below reserve)"
+    ax.text(ncol / 2.0, -(n + 1) - 0.35, note or sub, ha="center", va="top",
+            fontsize=st["annot_fontsize"], color=COLORS["text"])
+    return out
+
+
+# --- renderer B: bid -> payoff curve (truthfulness / shading) ----------------
+
+def draw_bid_payoff_curve(ax, *, mode, value, highest_other=None, n=2,
+                          your_bid=None, note=None):
+    """Your payoff as a function of your bid — the truthfulness / shading view.
+
+    ``mode="second_price"``: with the highest competing bid fixed at
+    ``highest_other``, your payoff is a step — 0 until your bid reaches
+    ``highest_other``, then the constant ``value - highest_other`` (which is the
+    *same* for every winning bid). Bidding your ``value`` always lands on the
+    better of the two plateaus, so truthful is **weakly best** — the four
+    over/under-bid x win/lose cases, in one picture.
+
+    ``mode="first_price"``: expected surplus ``P(win)*(value - bid)`` vs your
+    bid, when the ``n-1`` opponents play ``s(v)=(n-1)/n v``. It peaks at the
+    equilibrium shade ``(n-1)/n * value``.
+
+    ``your_bid`` (optional) marks the current slider position for the marquee
+    widgets. Everything is computed from the helpers — nothing hardcoded.
+    """
+    st = AUCTION_STYLE
+    apply_ax_style(ax)
+    ax.set_xlabel("your bid", fontsize=st["axis_fontsize"])
+    ax.set_ylabel("payoff", fontsize=st["axis_fontsize"])
+
+    if mode == "second_price":
+        h = float(highest_other if highest_other is not None else value * 0.6)
+        xmax = max(value, h) * 1.35 + 1e-9
+        win_payoff = value - h
+        # step function via the helper, evaluated densely
+        xs = [xmax * k / 240 for k in range(241)]
+        ys = [bid_payoff(value, b, [h], fmt="second_price") for b in xs]
+        ax.plot(xs, ys, color=st["curve_color"], linewidth=st["curve_width"])
+        # truthful bid marker
+        ax.axvline(value, color=st["truthful_color"], linestyle=":",
+                   linewidth=st["guide_width"])
+        ax.plot([value], [bid_payoff(value, value, [h], fmt="second_price")],
+                "o", markersize=10, markerfacecolor="white",
+                markeredgecolor=st["truthful_color"], markeredgewidth=2.2,
+                zorder=5)
+        ax.text(value, win_payoff if win_payoff > 0 else 0,
+                "  truthful $b=v$", color=st["truthful_color"],
+                fontsize=st["annot_fontsize"], va="bottom")
+        ax.axhline(0, color=st["guide_color"], linewidth=st["guide_width"],
+                   zorder=0)
+        best = max(0.0, win_payoff)
+        cap = (f"$v={_fmt_num(value)}$, top rival $={_fmt_num(h)}$ — best "
+               f"payoff ${_fmt_num(best)}$, reached by bidding $v$ "
+               f"(weakly dominant).")
+    elif mode == "first_price":
+        xs = [value * k / 240 for k in range(241)]
+        ys = [_win_prob_first_price(b, n) * (value - b) for b in xs]
+        ax.plot(xs, ys, color=st["curve_color"], linewidth=st["curve_width"])
+        bstar = equilibrium_shade(value, n)
+        gstar = _win_prob_first_price(bstar, n) * (value - bstar)
+        ax.axvline(bstar, color=st["optimum_color"], linestyle=":",
+                   linewidth=st["guide_width"])
+        ax.plot([bstar], [gstar], "o", markersize=11, markerfacecolor="white",
+                markeredgecolor=st["optimum_color"], markeredgewidth=2.4,
+                zorder=5)
+        ax.text(bstar, gstar, f"  shade $b^*={_fmt_num(bstar)}$",
+                color=st["optimum_color"], fontsize=st["annot_fontsize"],
+                va="bottom")
+        cap = (f"$v={_fmt_num(value)}$, $n={n}$ — expected surplus peaks at "
+               f"$b^*=\\frac{{{n-1}}}{{{n}}}v={_fmt_num(bstar)}$.")
+    else:
+        ax.text(0.5, 0.5, f"unknown mode {mode!r}", ha="center", va="center")
+        return None
+
+    if your_bid is not None:
+        ax.axvline(your_bid, color=st["marker_color"],
+                   linewidth=st["curve_width"], alpha=0.8, zorder=1)
+    if note:
+        cap = note
+    ax.set_title(cap, fontsize=st["annot_fontsize"], color=COLORS["text"])
+    return None
+
+
+# --- renderer C: revenue / parameter curve -----------------------------------
+
+def draw_revenue_curve(ax, *, kind="reserve", seller_value=0.0, n_max=8,
+                       note=None):
+    """A computed 1-D auction curve with its key feature marked.
+
+    ``kind="reserve"``: expected revenue ``r*(v+1-r)`` vs reserve ``r`` over
+    [0,1], peaking at ``optimal_reserve(v)=(1+v)/2``. ``kind="revenue_vs_n"``:
+    discrete second-price revenue ``(2^n-n-1)/2^n`` vs ``n`` (-> 1).
+    ``kind="shade_vs_n"``: the equilibrium shade factor ``(n-1)/n`` vs ``n``
+    (-> 1, "more bidders -> shade less").
+    """
+    st = AUCTION_STYLE
+    apply_ax_style(ax)
+    if kind == "reserve":
+        rs = [k / 240 for k in range(241)]
+        ys = [reserve_revenue(r, seller_value) for r in rs]
+        ax.plot(rs, ys, color=st["curve_color"], linewidth=st["curve_width"])
+        rstar = optimal_reserve(seller_value)
+        ax.axvline(rstar, color=st["optimum_color"], linestyle=":",
+                   linewidth=st["guide_width"])
+        ax.plot([rstar], [reserve_revenue(rstar, seller_value)], "o",
+                markersize=11, markerfacecolor="white",
+                markeredgecolor=st["optimum_color"], markeredgewidth=2.4,
+                zorder=5)
+        ax.set_xlabel("reserve price $r$", fontsize=st["axis_fontsize"])
+        ax.set_ylabel("expected revenue", fontsize=st["axis_fontsize"])
+        cap = (f"seller value $v={_fmt_num(seller_value)}$ — optimal reserve "
+               f"$r^*=\\frac{{1+v}}{{2}}={_fmt_num(rstar)}$.")
+    elif kind in ("revenue_vs_n", "shade_vs_n"):
+        ns = list(range(1, n_max + 1))
+        if kind == "revenue_vs_n":
+            ys = [second_price_revenue_binary(k) for k in ns]
+            ylab = "expected revenue"
+            cap = "discrete second-price revenue rises toward 1 as $n$ grows."
+        else:
+            ys = [(k - 1) / k for k in ns]
+            ylab = "shade factor $(n{-}1)/n$"
+            cap = "more bidders -> shade factor $(n{-}1)/n \\to 1$ (shade less)."
+        ax.plot(ns, ys, "-o", color=st["curve_color"],
+                linewidth=st["curve_width"], markersize=7,
+                markerfacecolor="white", markeredgecolor=st["curve_color"],
+                markeredgewidth=2)
+        ax.axhline(1.0, color=st["guide_color"], linestyle="--",
+                   linewidth=st["guide_width"])
+        ax.set_xlabel("number of bidders $n$", fontsize=st["axis_fontsize"])
+        ax.set_ylabel(ylab, fontsize=st["axis_fontsize"])
+    else:
+        ax.text(0.5, 0.5, f"unknown kind {kind!r}", ha="center", va="center")
+        return None
+    ax.set_title(note or cap, fontsize=st["annot_fontsize"],
+                 color=COLORS["text"])
+    return None
+
+
+# --- renderer D: common-value bids (winner's curse) --------------------------
+
+def draw_common_value_bids(ax, *, common_value, estimates, note=None):
+    """Winner's-curse strip: estimates ``v_i = v + x_i`` scattered around the
+    common value ``v`` on a number line; the winner (highest estimate, COMPUTED)
+    is highlighted to show the winner systematically over-estimates and overpays.
+    """
+    st = AUCTION_STYLE
+    est = [float(e) for e in estimates]
+    winner = max(range(len(est)), key=lambda i: (est[i], -i))
+    lo = min(min(est), common_value)
+    hi = max(max(est), common_value)
+    pad = (hi - lo) * 0.12 + 1e-9
+    ax.set_xlim(lo - pad, hi + pad)
+    ax.set_ylim(-1.0, 1.0)
+    ax.set_yticks([])
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    ax.spines["bottom"].set_position(("data", 0))
+    ax.spines["bottom"].set_color(COLORS["minor_tick"])
+    ax.tick_params(axis="x", labelsize=st["axis_fontsize"],
+                   color=COLORS["accent"], labelcolor=COLORS["text"])
+
+    # common value line
+    ax.axvline(common_value, color=st["common_value_color"], linewidth=2.0,
+               zorder=1)
+    ax.text(common_value, 0.78, f"common value $v={_fmt_num(common_value)}$",
+            ha="center", va="bottom", color=st["common_value_color"],
+            fontsize=st["annot_fontsize"])
+    # estimates as open circles on the line; winner highlighted in curse color
+    for i, e in enumerate(est):
+        is_w = (i == winner)
+        ax.plot([e], [0], "o", markersize=13 if is_w else 10,
+                markerfacecolor="white",
+                markeredgecolor=st["curse_color"] if is_w else st["estimate_color"],
+                markeredgewidth=2.6 if is_w else 2.0, zorder=3)
+    we = est[winner]
+    ax.annotate(f"winner bids highest (${_fmt_num(we)}$) — overpays by "
+                f"${_fmt_num(we - common_value)}$",
+                xy=(we, 0), xytext=(we, -0.7), ha="center",
+                color=st["curse_color"], fontsize=st["annot_fontsize"],
+                arrowprops=dict(arrowstyle="->", color=st["curse_color"]))
+    if note:
+        ax.set_title(note, fontsize=st["annot_fontsize"], color=COLORS["text"])
+    return {"winner": winner, "overpay": we - common_value}
+
+
+# -----------------------------------------------------------------------------
 # Annotation helper for missing/forbidden edges
 # -----------------------------------------------------------------------------
 

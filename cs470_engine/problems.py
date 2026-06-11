@@ -362,6 +362,65 @@ def _render_payoff_matrix(figure_spec: dict) -> None:
     plt.close(fig)
 
 
+def _render_auction(figure_spec: dict) -> None:
+    """Render the Lesson-3 auction figure kinds.
+
+    ``auction_table`` / ``bid_payoff_curve`` / ``revenue_curve`` /
+    ``common_value_bids`` — each defers winner/price/payoff/optimum to the
+    plot_style auction helpers, so the drawn figure can't drift from the key.
+    """
+    from . import plot_style as ps
+    kind = figure_spec.get("kind")
+    st = ps.AUCTION_STYLE
+
+    if kind == "auction_table":
+        bids = figure_spec.get("bids")
+        if not bids:
+            print("[engine] auction_table figure has no `bids`.")
+            return
+        n = len(bids)
+        fig, ax = plt.subplots(figsize=(st["margin_in"] + 6 * st["col_width_in"],
+                                        st["margin_in"] + (n + 1) * st["row_height_in"]))
+        ps.draw_auction_table(
+            ax, bids=bids, values=figure_spec.get("values"),
+            fmt=figure_spec.get("format", "second_price"),
+            reserve=figure_spec.get("reserve"),
+            labels=figure_spec.get("labels"), note=figure_spec.get("note"),
+        )
+    elif kind == "bid_payoff_curve":
+        fig, ax = plt.subplots(figsize=(5.4, 3.6))
+        ps.draw_bid_payoff_curve(
+            ax, mode=figure_spec.get("mode", "second_price"),
+            value=figure_spec.get("value", 1.0),
+            highest_other=figure_spec.get("highest_other"),
+            n=figure_spec.get("n", 2), your_bid=figure_spec.get("your_bid"),
+            note=figure_spec.get("note"),
+        )
+    elif kind == "revenue_curve":
+        fig, ax = plt.subplots(figsize=(5.4, 3.6))
+        ps.draw_revenue_curve(
+            ax, kind=figure_spec.get("curve", "reserve"),
+            seller_value=figure_spec.get("seller_value", 0.0),
+            n_max=figure_spec.get("n_max", 8), note=figure_spec.get("note"),
+        )
+    elif kind == "common_value_bids":
+        fig, ax = plt.subplots(figsize=(6.0, 2.6))
+        ps.draw_common_value_bids(
+            ax, common_value=figure_spec.get("common_value", 0.5),
+            estimates=figure_spec.get("estimates") or [],
+            note=figure_spec.get("note"),
+        )
+    else:
+        return
+    plt.tight_layout()
+    display(fig)
+    plt.close(fig)
+
+
+_AUCTION_KINDS = {"auction_table", "bid_payoff_curve", "revenue_curve",
+                  "common_value_bids"}
+
+
 def _render_figure(ws, figure_spec: dict) -> None:
     """Render a YAML figure spec into the current Output context.
 
@@ -396,6 +455,9 @@ def _render_figure(ws, figure_spec: dict) -> None:
         return
     if kind == "payoff_matrix":
         _render_payoff_matrix(figure_spec)
+        return
+    if kind in _AUCTION_KINDS:
+        _render_auction(figure_spec)
         return
     if kind != "graph":
         print(f"[engine] Figure kind {kind!r} not yet implemented.")
