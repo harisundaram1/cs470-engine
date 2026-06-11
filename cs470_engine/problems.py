@@ -25,8 +25,45 @@ def render_problem(ws, problem: dict) -> None:
 
 
 def _display_id(pid: str) -> str:
-    """Render `q_3` as `Q3` for student-facing display."""
+    """Render `q_3` as `Q3` from the INTERNAL id (fallback when no display map)."""
     return pid.replace("q_", "Q") if pid.startswith("q_") else pid
+
+
+def _q_display(ws, pid: str) -> str:
+    """Visible question label ``Q<n>`` using the sequential DISPLAY NUMBER
+    (interleaved on-page position). Falls back to the id-derived label when no
+    display map is present (older engine path / a pid outside the map)."""
+    dn = getattr(ws, "display_number", None)
+    if dn and pid in dn:
+        return f"Q{dn[pid]}"
+    return _display_id(pid)
+
+
+def _internal_id_html(ws, pid: str) -> str:
+    """Small muted ``(q_N)`` suffix beside the display number, for author/TA
+    cross-reference. Shown ONLY when the worksheet is reordered (display number
+    != id), so an un-interleaved worksheet (1.x) is unchanged. Display-only —
+    never enters grading, results.json, the shuffle seed, or the persistence
+    record (all of which key on ``pid``)."""
+    if not getattr(ws, "display_reordered", False):
+        return ""
+    return (f' <span style="color: #9aa3ad; font-size: 0.82em;">'
+            f'({pid})</span>')
+
+
+def _shuffle_seed(ws, pid: str) -> str | None:
+    """Per-(student, problem) seed string for the MC option-display shuffle.
+
+    ``"<session_id>:<pid>"`` — varies the option order per student (session) and
+    per problem, deterministically. Returns None when there is no session id
+    (e.g. answer-key/QA never opens a student session), which keeps the
+    canonical authored order. The live and restored render paths pass the same
+    pid, so a reopened problem shows the same order the student answered in.
+    """
+    session_id = getattr(ws, "session_id", None)
+    if not session_id:
+        return None
+    return f"{session_id}:{pid}"
 
 
 def _render_problem_cell(ws, problem: dict, mode: str) -> None:
@@ -41,7 +78,10 @@ def _render_problem_cell(ws, problem: dict, mode: str) -> None:
     hint_glyph = " · 💡" if has_hint else ""
     mode_hint = " · select all that apply" if mode == "multi_select" else ""
 
-    display(Markdown(f"**{_display_id(pid)} · {diff}**{hint_glyph}{mode_hint}"))
+    display(Markdown(
+        f"**{_q_display(ws, pid)} · {diff}**{hint_glyph}{mode_hint}"
+        f"{_internal_id_html(ws, pid)}"
+    ))
     display(Markdown(problem["prompt_markdown"]))
 
     if has_hint:
@@ -66,9 +106,22 @@ def _render_problem_cell(ws, problem: dict, mode: str) -> None:
     options = problem["options"]
     correct = list(problem.get("correct") or [])
     correct_set = set(correct)
+
+    # WIDGET RESTORATION: if this problem was answered in an earlier session that
+    # we restored at load() (kernel restart / workspace reopen), render it as
+    # already-answered — pre-fill the prior choice, lock it, show the recorded
+    # credit + rationale — instead of the live submit flow. The record is already
+    # in ws.scores (so finalize is correct regardless); this just makes progress
+    # visible and saves the student redoing it.
+    restored = ws.scores.get(pid) if getattr(ws, "restored_session", False) else None
+    if restored is not None:
+        _render_restored_problem(ws, problem, mode, restored, correct)
+        return
+
     picker = OptionPicker(
         [(opt["id"], opt["text"]) for opt in options],
         mode=mode,
+        shuffle_seed=_shuffle_seed(ws, pid),
     )
     display(picker.widget)
 
@@ -128,6 +181,7 @@ def _render_problem_cell(ws, problem: dict, mode: str) -> None:
         ws._record_answer(
             pid=pid, attempt=attempt, is_correct=is_perfect,
             credit=credit, locked=state["answered"],
+            chosen=list(chosen_set),
         )
 
     def on_gate_clear():
@@ -151,6 +205,50 @@ def _render_problem_cell(ws, problem: dict, mode: str) -> None:
     display(feedback_out)
 
 
+def _render_restored_problem(ws, problem: dict, mode: str, entry: dict,
+                             correct: list) -> None:
+    """Render a problem already answered in a restored (reopened) session.
+
+    Pre-fills the student's recorded choice, locks the picker, marks correct/
+    wrong, and shows the recorded credit + rationale. No submit button, no time
+    gate — the answer is already in ``ws.scores`` and counts toward finalize.
+    """
+    from .messages import RESTORED_ANSWER_BANNER_MD
+
+    options = problem["options"]
+    chosen = list(entry.get("chosen") or [])
+    credit = float(entry.get("credit", 0.0))
+    attempt = int(entry.get("attempt", 0))
+    is_correct = bool(entry.get("correct", False))
+
+    display(Markdown(RESTORED_ANSWER_BANNER_MD))
+    picker = OptionPicker(
+        [(opt["id"], opt["text"]) for opt in options],
+        mode=("multi_select" if mode == "multi_select" else "single_select"),
+        # SAME seed as the live render (session_id + pid) so the restored cell
+        # shows options in the order the student answered in — the pre-filled,
+        # locked choice then lines up with the checkbox they actually clicked.
+        shuffle_seed=_shuffle_seed(ws, problem["id"]),
+    )
+    if chosen:
+        picker.pre_select(chosen)
+    picker.lock()
+    picker.show_correct(correct)
+    display(picker.widget)
+
+    if is_correct:
+        tries = "try" if attempt == 1 else "tries"
+        marker, tag = "✓", f"Correct ({attempt} {tries})"
+    elif credit > 0:
+        marker, tag = "◐", "Partial credit"
+    else:
+        marker, tag = "✗", "No credit"
+    display(Markdown(
+        f"**{marker} {tag}** — recorded credit {credit:.2f}\n\n"
+        f"**Rationale:** {problem['rationale_markdown']}"
+    ))
+
+
 def render_problem_answer_key(ws, problem: dict) -> None:
     """Answer-key (instructor QA) render for a problem.
 
@@ -165,7 +263,8 @@ def render_problem_answer_key(ws, problem: dict) -> None:
     mode_hint = " · select all that apply" if qtype == "multi_select" else ""
 
     display(Markdown(
-        f"**[ANSWER KEY] {_display_id(pid)} · {diff}**{mode_hint}"
+        f"**[ANSWER KEY] {_q_display(ws, pid)} · {diff}**{mode_hint}"
+        f"{_internal_id_html(ws, pid)}"
     ))
     display(Markdown(problem["prompt_markdown"]))
 

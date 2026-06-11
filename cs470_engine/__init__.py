@@ -12,7 +12,19 @@ Stubbed and slated for later engine releases:
   - Gradescope / PrairieLearn submission backends.
 """
 
+from importlib.metadata import version, PackageNotFoundError
+
 from .worksheet import Worksheet
 
 __all__ = ["Worksheet"]
-__version__ = "0.2.1"
+
+# Derive the version from the installed package metadata (pyproject) rather than
+# a hand-maintained literal, which had drifted (stale "0.2.1"). This makes
+# ``cs470_engine.__version__`` always match the installed wheel — the
+# authoritative check when verifying which engine a built image actually runs
+# (LESSON_2_DEPLOY.md step 2). Falls back to a sentinel for a source tree with
+# no install.
+try:
+    __version__ = version("cs470-engine")
+except PackageNotFoundError:  # running from an uninstalled source tree
+    __version__ = "0+unknown"

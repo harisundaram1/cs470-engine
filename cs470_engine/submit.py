@@ -43,8 +43,9 @@ class SubmitBackend(ABC):
 
 
 class LocalDownloadBackend(SubmitBackend):
-    """Default backend: write ``<id>_results.json`` into the notebook's
-    working directory for manual download and upload."""
+    """Default backend (running outside PL): write ``<id>_results.json`` into
+    the notebook's working directory. There is no PL question page here, so the
+    instruction is a plain local-run note — not an upload step."""
 
     def emit_results(self, results: dict, dest_dir: Path) -> Path:
         dest_dir = Path(dest_dir)
@@ -54,11 +55,8 @@ class LocalDownloadBackend(SubmitBackend):
         return out
 
     def submission_instructions(self) -> str:
-        return (
-            "A results file was written next to this notebook. Download it "
-            "and upload it to the course submission page to record your "
-            "participation credit."
-        )
+        from .messages import SUBMIT_INSTRUCTIONS_LOCAL_MD
+        return SUBMIT_INSTRUCTIONS_LOCAL_MD
 
 
 class PrairieLearnBackend(SubmitBackend):
@@ -77,12 +75,8 @@ class PrairieLearnBackend(SubmitBackend):
         return out
 
     def submission_instructions(self) -> str:
-        return (
-            "✅ Your work is saved. **One more step**: leave this workspace, "
-            "return to the PrairieLearn question page (the tab you came from), "
-            "and click the blue Save & Grade button there. Your participation "
-            "won't be recorded until you do."
-        )
+        from .messages import SUBMIT_INSTRUCTIONS_PL_MD
+        return SUBMIT_INSTRUCTIONS_PL_MD
 
 
 def select_backend() -> SubmitBackend:
@@ -152,20 +146,40 @@ def build_results(ws) -> dict:
 
 def finalize(ws) -> None:
     """Build the results payload, emit it through the selected backend, and
-    show the student a short confirmation with submission instructions."""
+    show the student a short confirmation with submission instructions.
+
+    GUARD: if the session has **0** answered problems, warn clearly and DO NOT
+    write results — the most likely cause is a reopened workspace whose fresh
+    kernel hasn't reloaded the saved answers (Restart & Run All fixes it). This
+    closes the reopen footgun where finalizing an empty kernel would silently
+    record 0%. (A genuinely empty worksheet hits the same guard, which is the
+    right outcome — there is nothing to submit.)
+    """
     results = build_results(ws)
+    s = results["summary"]
+
+    if s["answered"] == 0:
+        from .messages import EMPTY_SESSION_GUARD_MD
+        display(Markdown(
+            EMPTY_SESSION_GUARD_MD.format(total=int(s["total_possible"]))
+        ))
+        return
+
     backend = select_backend()
     out = backend.emit_results(results, Path.cwd())
 
-    s = results["summary"]
     status = "✓ above" if s["passed_threshold"] else "✗ below"
+    restored_note = ""
+    if getattr(ws, "restored_session", False):
+        from .messages import RESTORED_SESSION_NOTE_MD
+        restored_note = f"\n\n{RESTORED_SESSION_NOTE_MD}"
     display(Markdown(
         f"### Submission · {ws.id}\n\n"
         f"**{s['total_credit']:.2f} / {s['total_possible']:.0f}** "
         f"({s['fraction'] * 100:.1f}%) — {status} the "
         f"{int(ws.pass_threshold * 100)}% participation threshold.\n\n"
         f"Results written to `{out}`.\n\n"
-        f"{backend.submission_instructions()}"
+        f"{backend.submission_instructions()}{restored_note}"
     ))
 
 

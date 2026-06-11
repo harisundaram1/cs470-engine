@@ -1,5 +1,7 @@
 """ipywidgets helpers for the engine."""
 
+import hashlib
+import random
 import threading
 import time
 
@@ -11,6 +13,32 @@ from .plot_style import COLORS
 # Slight type-size bump for MC option labels — readable but not blown out.
 def _option_label_wrap(html: str) -> str:
     return f'<span style="font-size: 1.05em;">{html}</span>'
+
+
+def _stable_seed(key: str) -> int:
+    """A process-independent integer seed derived from ``key``.
+
+    Uses a BLAKE2b digest rather than the builtin ``hash()`` (which is salted
+    per process via PYTHONHASHSEED), so the same key produces the same seed in
+    every kernel — required for the option order to survive a kernel restart and
+    match the order a student answered in (the restored-problem view relies on
+    this). The first 8 digest bytes are ample entropy for seeding ``Random``.
+    """
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big")
+
+
+def _shuffled_options(options, seed_key: str):
+    """Return ``options`` reordered by a deterministic permutation of ``seed_key``.
+
+    A fresh ``random.Random`` seeded from ``_stable_seed(seed_key)`` drives the
+    shuffle, so the permutation is process-independent and depends only on the
+    key string (e.g. ``"<session_id>:<pid>"``). Distinct keys give independent
+    orders; identical keys always give the same order.
+    """
+    items = list(options)
+    random.Random(_stable_seed(seed_key)).shuffle(items)
+    return items
 
 
 def submit_button_with_gate(seconds: int, on_click, on_gate_clear=None):
@@ -107,7 +135,7 @@ class OptionPicker:
         once the cell is finalized.
     """
 
-    def __init__(self, options, *, mode: str):
+    def __init__(self, options, *, mode: str, shuffle_seed: str | None = None):
         assert mode in ("single_select", "multi_select"), mode
         self.mode = mode
         self._option_ids: list[str] = []
@@ -117,6 +145,20 @@ class OptionPicker:
         self._observers: list = []
         self._silencing = False
         rows = []
+
+        # Per-student display shuffle. When ``shuffle_seed`` is given (the live
+        # render path passes ``"<session_id>:<pid>"``), the DISPLAY order of the
+        # options is permuted deterministically from that string so the correct
+        # answer doesn't sit in the same slot for every student. Ids are
+        # untouched and grading is an id-set comparison (see ``selected_ids``),
+        # so the shuffle cannot affect scoring. Seeding uses hashlib — NOT the
+        # builtin ``hash()``, which is salted per process — so the same
+        # ``(session_id, pid)`` yields the SAME order across kernel restarts,
+        # which the restored-answer view depends on. ``shuffle_seed=None``
+        # (answer-key / QA) keeps the canonical authored order.
+        options = list(options)
+        if shuffle_seed is not None:
+            options = _shuffled_options(options, shuffle_seed)
 
         for oid, label in options:
             cb = widgets.Checkbox(
