@@ -1209,13 +1209,32 @@ def _win_prob_first_price(bid, n):
 # --- renderer A: auction outcome table ---------------------------------------
 
 def draw_auction_table(ax, *, bids, values=None, fmt="second_price",
-                       reserve=None, labels=None, note=None):
+                       reserve=None, labels=None, note=None,
+                       compare=None, compare_headers=None):
     """Render an auction outcome table; winner + price + payoff COMPUTED.
 
     One row per bidder with columns Bidder / Value / Bid / Wins / Pays /
     Payoff. ``bids`` decides the outcome; ``values`` (default = ``bids``, i.e.
     truthful bidding) feeds the payoff column. The winning row is tinted and its
     price marked. Booktabs-style (top/header/bottom rules, no vertical lines).
+
+    Paired/comparison mode — ``compare`` an ordered list of formats, e.g.
+    ``compare=["first_price", "second_price"]`` — prices the *same* bids two (or
+    more) ways on the *single* ``ax``: the shared Bidder/Value/Bid/Wins columns
+    are followed by a Pays + Payoff column pair per listed format, in list
+    order, so each bidder row shows both prices side by side. Each format's
+    Pays + Payoff pair is grouped under a single per-format super-header (a
+    two-row header: short "Pays"/"Payoff" sub-headers under a format name) so
+    the eight columns fit at notebook width without colliding. The winner and
+    sold/unsold status depend only on the bids (highest bid wins; sold iff the
+    top bid clears any ``reserve``), so they stay shared — only the price, and
+    hence payoff, differs by format. ``compare_headers`` optionally overrides
+    the per-format super-header (a ``{format: label}`` map), e.g. to label the
+    equivalence "First-price ≡ Dutch". In compare mode the single
+    "{fmt}-price auction" sub-caption is suppressed (ambiguous with two
+    formats); pass ``note=`` to set a caption explicitly. With ``compare=None``
+    the rendering is unchanged and returns the single outcome dict; in compare
+    mode it returns ``{format: outcome_dict}`` for every listed format.
     """
     bids = [float(b) for b in bids]
     n = len(bids)
@@ -1224,6 +1243,10 @@ def draw_auction_table(ax, *, bids, values=None, fmt="second_price",
         return None
     values = [float(v) for v in (values if values is not None else bids)]
     labels = labels or [f"B{i + 1}" for i in range(n)]
+    if compare is not None:
+        return _draw_auction_compare(
+            ax, bids=bids, values=values, labels=labels, formats=compare,
+            reserve=reserve, note=note, headers=compare_headers)
     out = auction_outcome(bids, fmt=fmt, reserve=reserve)
     st = AUCTION_STYLE
 
@@ -1281,6 +1304,193 @@ def draw_auction_table(ax, *, bids, values=None, fmt="second_price",
     ax.text(ncol / 2.0, -(n + 1) - 0.35, note or sub, ha="center", va="top",
             fontsize=st["annot_fontsize"], color=COLORS["text"])
     return out
+
+
+def _auction_fmt_label(fmt):
+    """Hyphenated display label for an auction-format key
+    (``"first_price"`` -> ``"first-price"``)."""
+    return {"first_price": "first-price",
+            "second_price": "second-price"}.get(fmt, str(fmt).replace("_", "-"))
+
+
+def _compare_group_label(fmt, headers):
+    """Super-header label for one format group in the paired auction table:
+    the caller's ``compare_headers[fmt]`` when given (e.g. an equivalence label
+    ``"First-price ≡ Dutch"``), else the capitalized format name
+    (``"First-price"``). A literal ``≡`` is rendered via mathtext — the body
+    font (Helvetica) lacks the glyph but the CM mathtext fontset has it, the
+    same idiom the table uses for ``"$-$"``."""
+    if headers and fmt in headers:
+        lbl = headers[fmt]
+    else:
+        lbl = _auction_fmt_label(fmt)
+        lbl = lbl[:1].upper() + lbl[1:]
+    return lbl.replace("≡", r"$\equiv$")
+
+
+def _wrap_header(text, width):
+    """Greedily wrap a header onto multiple lines on whitespace only — never
+    splitting a word or a hyphenated term — so a long compare super-header such
+    as ``"Second-price ≡ English"`` stacks instead of overrunning its group.
+    Width is measured *visually*: a ``$...$`` mathtext span (e.g.
+    ``$\\equiv$``) counts as one glyph, not its source length, so it wraps with
+    its neighbor rather than landing alone."""
+    width = max(6, width)
+    words = text.split()
+    if not words:
+        return text
+    lines, cur, cur_len = [], [], 0
+    for w in words:
+        wl = len(re.sub(r"\$[^$]*\$", "x", w))   # mathtext span -> 1 glyph
+        if cur and cur_len + 1 + wl > width:
+            lines.append(" ".join(cur))
+            cur, cur_len = [w], wl
+        else:
+            cur_len += (1 if cur else 0) + wl
+            cur.append(w)
+    if cur:
+        lines.append(" ".join(cur))
+    return "\n".join(lines)
+
+
+def _draw_auction_compare(ax, *, bids, values, labels, formats, reserve,
+                          note, headers):
+    """Paired/comparison auction table on a single ``ax`` (see
+    ``draw_auction_table``'s ``compare`` argument).
+
+    Shared Bidder/Value/Bid/Wins columns, then a Pays + Payoff pair per format
+    in list order, the pair grouped under one per-format super-header (a two-row
+    header) so the eight columns fit at notebook width. Winner and sold/unsold
+    status are format-independent (they follow from the bids), so they are
+    computed once and shared; only price and payoff vary by format. Returns
+    ``{format: auction_outcome(...)}``.
+    """
+    from matplotlib.patches import Rectangle
+
+    st = AUCTION_STYLE
+    n = len(bids)
+    headers = headers or {}
+
+    outs = {f: auction_outcome(bids, fmt=f, reserve=reserve) for f in formats}
+    base = outs[formats[0]]            # winner/sold do not depend on the format
+    sold = base["sold"]
+    winner = base["winner"]
+
+    # Column layout. Shared columns carry a single centered header; each format
+    # contributes a Pays + Payoff sub-column pair grouped under one super-header
+    # (the format name, or a caller equivalence label). Short "Pays"/"Payoff"
+    # sub-headers + a grouped super-header keep all eight columns from colliding
+    # at notebook width — the old long per-column headers ("Pays (second-price)",
+    # "Payoff (first-price)") overlapped once the figure shrank to ~700-900px.
+    # Each entry is (text, width, kind, fmt); kind drives the cell value/tint.
+    shared = [("Bidder", 1.1), ("Value", 0.95), ("Bid", 0.95), ("Wins", 0.85)]
+    pays_w, payoff_w = 1.4, 1.4
+    columns = [(name, w, "shared", None) for name, w in shared]
+    groups = []                        # (fmt, super_label, x_left, x_right)
+    for f in formats:
+        x0 = sum(w for _, w, _, _ in columns)         # left edge of this group
+        columns.append(("Pays", pays_w, "pays", f))
+        columns.append(("Payoff", payoff_w, "payoff", f))
+        x1 = sum(w for _, w, _, _ in columns)         # right edge of this group
+        groups.append((f, _compare_group_label(f, headers), x0, x1))
+
+    # Cumulative x extents -> per-column centers.
+    x_left, acc = [], 0.0
+    for _, w, _, _ in columns:
+        x_left.append(acc)
+        acc += w
+    total_w = acc
+    centers = [x_left[i] + columns[i][1] / 2.0 for i in range(len(columns))]
+
+    # Wrap each super-header to its group width; the tallest sets the super row
+    # (a long equivalence label like "Second-price ≡ English" stacks to 2 lines,
+    # a plain "First-price" stays on 1).
+    super_wrapped, super_lines = [], 1
+    for _f, lbl, x0, x1 in groups:
+        wt = _wrap_header(lbl, int(round((x1 - x0) * 5.5)))
+        super_wrapped.append(wt)
+        super_lines = max(super_lines, wt.count("\n") + 1)
+
+    # Two-row header band: a super-header row (1-2 lines) over a one-line
+    # sub-header row, with a booktabs cmidrule between them per group.
+    top_pad, row_h, gap, bot_pad = 0.18, 0.46, 0.16, 0.16
+    super_block = row_h * super_lines
+    header_h = top_pad + super_block + gap + row_h + bot_pad
+    y_super = -(top_pad + super_block / 2.0)
+    y_cmid = -(top_pad + super_block + gap / 2.0)
+    y_sub = -(top_pad + super_block + gap + row_h / 2.0)
+    y_shared = -header_h / 2.0
+
+    cap_pad = 0.9 if note else 0.25
+    ax.set_xlim(0, total_w)
+    ax.set_ylim(-(header_h + n) - cap_pad, 0)
+    ax.set_aspect("auto")
+    ax.autoscale(False)
+    ax.set_axis_off()
+
+    # Winner row tint, spanning the full (wider) table.
+    if sold and winner is not None:
+        ax.add_patch(Rectangle((0, -(header_h + winner + 1)), total_w, 1,
+                               facecolor=st["winner_fill"],
+                               alpha=st["winner_fill_alpha"],
+                               edgecolor="none", zorder=0))
+
+    hfs = st["header_fontsize"] - 1
+    # Shared headers: vertically centered across the whole band.
+    for i, (text, w, kind, _f) in enumerate(columns):
+        if kind == "shared":
+            ax.text(centers[i], y_shared, text, ha="center", va="center",
+                    fontsize=hfs, fontweight="bold", color=COLORS["primary"])
+    # Per-format super-headers + a thin cmidrule grouping each Pays+Payoff pair.
+    for (_f, _lbl, x0, x1), wt in zip(groups, super_wrapped):
+        ax.text((x0 + x1) / 2.0, y_super, wt, ha="center", va="center",
+                fontsize=hfs, fontweight="bold", color=COLORS["primary"],
+                linespacing=1.05)
+        ax.plot([x0 + 0.08, x1 - 0.08], [y_cmid, y_cmid],
+                color=st["rule_color"], linewidth=st["thin_rule_width"],
+                zorder=2)
+    # Sub-headers (Pays / Payoff) under each super-header.
+    for i, (text, w, kind, _f) in enumerate(columns):
+        if kind in ("pays", "payoff"):
+            ax.text(centers[i], y_sub, text, ha="center", va="center",
+                    fontsize=hfs, fontweight="bold", color=COLORS["primary"])
+
+    # Rows.
+    for r in range(n):
+        y = -(header_h + r + 0.5)
+        won = (winner == r and sold)
+        for i, (text, w, kind, f) in enumerate(columns):
+            color = COLORS["text"]
+            if kind == "shared":
+                if text == "Bidder":
+                    val = labels[r]
+                elif text == "Value":
+                    val = _fmt_num(values[r])
+                elif text == "Bid":
+                    val = _fmt_num(bids[r])
+                else:  # Wins
+                    val = "yes" if won else "no"
+            elif kind == "pays":
+                val = _fmt_num(outs[f]["price"]) if won else "$-$"
+                color = st["price_color"] if won else COLORS["text"]
+            else:  # payoff
+                val = _fmt_num((values[r] - outs[f]["price"]) if won else 0.0)
+            ax.text(centers[i], y, val, ha="center", va="center",
+                    fontsize=st["cell_fontsize"], color=color)
+
+    # Booktabs rules (top / under-header / bottom).
+    for yy, lw in [(0, st["rule_width"]), (-header_h, st["thin_rule_width"]),
+                   (-(header_h + n), st["rule_width"])]:
+        ax.plot([0, total_w], [yy, yy], color=st["rule_color"], linewidth=lw,
+                zorder=2)
+
+    # Sub-caption suppressed by default in compare mode (ambiguous with two
+    # formats); render only an explicit note override.
+    if note:
+        ax.text(total_w / 2.0, -(header_h + n) - 0.35, note,
+                ha="center", va="top",
+                fontsize=st["annot_fontsize"], color=COLORS["text"])
+    return outs
 
 
 # --- renderer B: bid -> payoff curve (truthfulness / shading) ----------------
