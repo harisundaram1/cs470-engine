@@ -386,6 +386,7 @@ def _render_auction(figure_spec: dict) -> None:
             fmt=figure_spec.get("format", "second_price"),
             reserve=figure_spec.get("reserve"),
             labels=figure_spec.get("labels"), note=figure_spec.get("note"),
+            mask_winner_price=figure_spec.get("mask_winner_price", False),
         )
     elif kind == "bid_payoff_curve":
         fig, ax = plt.subplots(figsize=(5.4, 3.6))

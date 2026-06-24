@@ -1210,7 +1210,8 @@ def _win_prob_first_price(bid, n):
 
 def draw_auction_table(ax, *, bids, values=None, fmt="second_price",
                        reserve=None, labels=None, note=None,
-                       compare=None, compare_headers=None):
+                       compare=None, compare_headers=None,
+                       mask_winner_price=False):
     """Render an auction outcome table; winner + price + payoff COMPUTED.
 
     One row per bidder with columns Bidder / Value / Bid / Wins / Pays /
@@ -1235,6 +1236,15 @@ def draw_auction_table(ax, *, bids, values=None, fmt="second_price",
     formats); pass ``note=`` to set a caption explicitly. With ``compare=None``
     the rendering is unchanged and returns the single outcome dict; in compare
     mode it returns ``{format: outcome_dict}`` for every listed format.
+
+    ``mask_winner_price`` (single-format only) blanks the WINNING row's Pays and
+    Payoff cells to a literal ``"?"`` so a figure can SET UP a second-price
+    scenario without revealing the price/payoff the question asks for. Only the
+    winner row's last two cells change (rendered as plain ``"?"`` in the normal
+    cell color, not the price highlight); every other cell — including the
+    winner-row tint and non-winner rows' ``"$-$"``/``0`` — is untouched. It is
+    incompatible with ``compare`` (paired mode has no single defined winner-price
+    cell): passing both raises ``ValueError`` rather than half-applying.
     """
     bids = [float(b) for b in bids]
     n = len(bids)
@@ -1244,6 +1254,10 @@ def draw_auction_table(ax, *, bids, values=None, fmt="second_price",
     values = [float(v) for v in (values if values is not None else bids)]
     labels = labels or [f"B{i + 1}" for i in range(n)]
     if compare is not None:
+        if mask_winner_price:
+            raise ValueError(
+                "mask_winner_price is single-format only (compare=None); "
+                "paired compare mode has no single winner-price cell to mask")
         return _draw_auction_compare(
             ax, bids=bids, values=values, labels=labels, formats=compare,
             reserve=reserve, note=note, headers=compare_headers)
@@ -1280,12 +1294,16 @@ def draw_auction_table(ax, *, bids, values=None, fmt="second_price",
     for i in range(n):
         y = -(i + 1.5)
         won = (out["winner"] == i and out["sold"])
+        masked = won and mask_winner_price   # hide the answer (Pays + Payoff)
         pays = _fmt_num(out["price"]) if won else "$-$"
         payoff = (values[i] - out["price"]) if won else 0.0
         cells = [labels[i], _fmt_num(values[i]), _fmt_num(bids[i]),
                  ("yes" if won else "no"), pays, _fmt_num(payoff)]
+        if masked:
+            cells[4] = cells[5] = "?"        # plain literal, normal cell color
         for c, txt in enumerate(cells):
-            color = st["price_color"] if (won and c == 4) else COLORS["text"]
+            color = (st["price_color"] if (won and c == 4 and not masked)
+                     else COLORS["text"])
             ax.text(c + 0.5, y, txt, ha="center", va="center",
                     fontsize=st["cell_fontsize"], color=color)
 
