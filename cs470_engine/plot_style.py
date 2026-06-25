@@ -1206,6 +1206,29 @@ def _win_prob_first_price(bid, n):
     return per ** (n - 1)
 
 
+def pretend_value_payoff(value, pretend, n=2):
+    """Expected first-price surplus when your true value is ``value`` but you
+    bid as if your value were ``pretend`` — report type ``pretend``, hence bid
+    the symmetric equilibrium ``s(pretend)=(n-1)/n*pretend`` — against ``n-1``
+    rivals playing the same strategy with values ~ U(0,1).
+
+    Each rival's bid is below yours iff their value is below ``pretend``, so
+    ``P(win)=pretend**(n-1)`` directly — SMOOTH, with NO ``min`` saturation/clamp
+    for ``pretend`` in [0,1] (it is the rival-value CDF, never pinned at 1 inside
+    the support). The payoff is therefore::
+
+        g = pretend**(n-1) * (value - equilibrium_shade(pretend, n))
+
+    a smooth function of ``pretend`` whose unique stationary point is
+    ``pretend = value`` (``g'(value)=0`` for every ``n``): reporting your true
+    type is optimal. This is the honest "flat top" of the first-price FOC — no
+    kink, unlike the bid-swept ``first_price`` surplus curve, whose maximum sits
+    at the saturation corner ``b=value``.
+    """
+    p = max(0.0, pretend)
+    return p ** (n - 1) * (value - equilibrium_shade(p, n))
+
+
 # --- renderer A: auction outcome table ---------------------------------------
 
 def draw_auction_table(ax, *, bids, values=None, fmt="second_price",
@@ -1526,7 +1549,15 @@ def draw_bid_payoff_curve(ax, *, mode, value, highest_other=None, n=2,
 
     ``mode="first_price"``: expected surplus ``P(win)*(value - bid)`` vs your
     bid, when the ``n-1`` opponents play ``s(v)=(n-1)/n v``. It peaks at the
-    equilibrium shade ``(n-1)/n * value``.
+    equilibrium shade ``(n-1)/n * value`` — a kinked curve whose maximum is the
+    saturation corner.
+
+    ``mode="first_price_pretend"``: the *smooth* companion to ``first_price``.
+    The x-axis is the **pretend value** ``tilde-v`` (the type you report) over
+    the full support [0,1], not the bid; you bid the equilibrium ``s(tilde-v)``.
+    The payoff ``pretend_value_payoff(value, tilde-v, n)`` is smooth with no
+    saturation clamp and peaks at the truthful report ``tilde-v = value`` for
+    every ``n`` — the honest "flat top" of the first-price FOC (``g'(v)=0``).
 
     ``your_bid`` (optional) marks the current slider position for the marquee
     widgets. Everything is computed from the helpers — nothing hardcoded.
@@ -1576,6 +1607,32 @@ def draw_bid_payoff_curve(ax, *, mode, value, highest_other=None, n=2,
                 va="bottom")
         cap = (f"$v={_fmt_num(value)}$, $n={n}$ — expected surplus peaks at "
                f"$b^*=\\frac{{{n-1}}}{{{n}}}v={_fmt_num(bstar)}$.")
+    elif mode == "first_price_pretend":
+        # The x-axis is the *pretend value* (the type you report) over the full
+        # value support [0,1] — a different semantic axis from the kinked
+        # ``first_price`` mode, which sweeps the BID over [0, value]. The curve
+        # is smooth (no saturation corner) and peaks at the truthful report
+        # tilde-v = v, making the first-price FOC "flat top" honest.
+        ax.set_xlabel("pretend value $\\tilde{v}$ (the type you report)",
+                      fontsize=st["axis_fontsize"])
+        vts = [k / 240 for k in range(241)]
+        ys = [pretend_value_payoff(value, vt, n) for vt in vts]
+        ax.plot(vts, ys, color=st["curve_color"], linewidth=st["curve_width"])
+        vstar = value
+        gstar = pretend_value_payoff(value, vstar, n)
+        ax.axvline(vstar, color=st["optimum_color"], linestyle=":",
+                   linewidth=st["guide_width"])
+        ax.plot([vstar], [gstar], "o", markersize=11, markerfacecolor="white",
+                markeredgecolor=st["optimum_color"], markeredgewidth=2.4,
+                zorder=5)
+        ax.text(vstar, gstar, "truthful $\\tilde{v}=v$  ",
+                color=st["optimum_color"], fontsize=st["annot_fontsize"],
+                va="bottom", ha="right")
+        ax.axhline(0, color=st["guide_color"], linewidth=st["guide_width"],
+                   zorder=0)
+        cap = (f"$v={_fmt_num(value)}$, $n={n}$ — bid as if your value were "
+               f"$\\tilde{{v}}$; smooth surplus peaks at $\\tilde{{v}}=v$ "
+               f"(report truthfully, no kink).")
     else:
         ax.text(0.5, 0.5, f"unknown mode {mode!r}", ha="center", va="center")
         return None
