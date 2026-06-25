@@ -48,6 +48,7 @@ from IPython.display import display, Markdown
 
 from .plot_style import CONTROL_STYLE, FIGURE_STYLE
 from .widgets import ClickCounterButton
+from .messages import mathjax_safe_currency
 
 
 _LESSON_MODULE_CACHE: dict[str, object] = {}
@@ -133,9 +134,9 @@ def render_concept(ws, section: dict) -> None:
     )
 
     # Title is owned by the `title` field; descriptions are body-only.
-    display(Markdown(f"### {title}"))
+    display(Markdown(f"### {mathjax_safe_currency(title)}"))
     if description:
-        display(Markdown(description))
+        display(Markdown(mathjax_safe_currency(description)))
 
     # Build the controls dict and matching widget list.
     controls: dict[str, object] = {}
@@ -199,7 +200,7 @@ def render_concept(ws, section: dict) -> None:
         with caption_out:
             caption_out.clear_output(wait=True)
             if caption_text:
-                display(Markdown(caption_text))
+                display(Markdown(mathjax_safe_currency(caption_text)))
 
     # Wire change observers.
     for obj in controls.values():
@@ -239,4 +240,4 @@ def render_concept(ws, section: dict) -> None:
     _draw()
 
     if takeaway:
-        display(Markdown(takeaway))
+        display(Markdown(mathjax_safe_currency(takeaway)))

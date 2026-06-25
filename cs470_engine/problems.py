@@ -14,6 +14,7 @@ from IPython.display import display, Markdown, HTML
 from .plot_style import HINT_SUMMARY_STYLE
 from .scoring import credit_for_attempt, multi_select_credit, MAX_ATTEMPTS
 from .widgets import OptionPicker, submit_button_with_gate
+from .messages import mathjax_safe_currency
 
 
 def render_problem(ws, problem: dict) -> None:
@@ -82,7 +83,7 @@ def _render_problem_cell(ws, problem: dict, mode: str) -> None:
         f"**{_q_display(ws, pid)} · {diff}**{hint_glyph}{mode_hint}"
         f"{_internal_id_html(ws, pid)}"
     ))
-    display(Markdown(problem["prompt_markdown"]))
+    display(Markdown(mathjax_safe_currency(problem["prompt_markdown"])))
 
     if has_hint:
         # <details> works without JS in Colab and Jupyter per design doc §6.2.
@@ -168,7 +169,8 @@ def _render_problem_cell(ws, problem: dict, mode: str) -> None:
                 feedback_out.clear_output()
                 display(Markdown(
                     f"**{marker} {tag}** — credit {credit:.2f}\n\n"
-                    f"**Rationale:** {problem['rationale_markdown']}"
+                    f"**Rationale:** "
+                    f"{mathjax_safe_currency(problem['rationale_markdown'])}"
                 ))
         else:
             with feedback_out:
@@ -245,7 +247,8 @@ def _render_restored_problem(ws, problem: dict, mode: str, entry: dict,
         marker, tag = "✗", "No credit"
     display(Markdown(
         f"**{marker} {tag}** — recorded credit {credit:.2f}\n\n"
-        f"**Rationale:** {problem['rationale_markdown']}"
+        f"**Rationale:** "
+        f"{mathjax_safe_currency(problem['rationale_markdown'])}"
     ))
 
 
@@ -266,7 +269,7 @@ def render_problem_answer_key(ws, problem: dict) -> None:
         f"**[ANSWER KEY] {_q_display(ws, pid)} · {diff}**{mode_hint}"
         f"{_internal_id_html(ws, pid)}"
     ))
-    display(Markdown(problem["prompt_markdown"]))
+    display(Markdown(mathjax_safe_currency(problem["prompt_markdown"])))
 
     if problem.get("hint_markdown"):
         hint_html = _markdown.markdown(
@@ -297,7 +300,8 @@ def render_problem_answer_key(ws, problem: dict) -> None:
     display(picker.widget)
 
     display(Markdown(
-        f"**Rationale:** {problem['rationale_markdown']}"
+        f"**Rationale:** "
+        f"{mathjax_safe_currency(problem['rationale_markdown'])}"
     ))
 
 

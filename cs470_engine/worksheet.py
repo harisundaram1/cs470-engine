@@ -21,6 +21,7 @@ from .problems import render_problem, render_problem_answer_key
 from .scoring import credit_for_attempt, multi_select_credit
 from .submit import finalize as _finalize
 from .persistence import SessionStore
+from .messages import mathjax_safe_currency
 
 
 DEFAULT_TIME_GATES = {"easy": 15, "medium": 30, "hard": 60}
@@ -188,7 +189,7 @@ class Worksheet:
                 f"restored from this workspace._"
             )
         display(Markdown(
-            f"# {self.title}\n\n"
+            f"# {mathjax_safe_currency(self.title)}\n\n"
             f"_Session {self.session_id[:8]}_\n\n"
             f"{RECORD_INSTRUCTIONS_MD}{restored_note}"
         ))
@@ -221,7 +222,7 @@ class Worksheet:
         self.session_id = uuid.uuid4().hex
         self.record_display_id = f"record-{self.id}-{self.session_id[:8]}"
         display(Markdown(
-            f"# {self.title} — Answer Key\n\n"
+            f"# {mathjax_safe_currency(self.title)} — Answer Key\n\n"
             f"_Instructor QA build. Each problem renders with the declared "
             f"correct answer(s) pre-selected and the rationale visible._"
         ))
@@ -234,7 +235,7 @@ class Worksheet:
 
         stype = section.get("type")
         if stype == "intro":
-            display(Markdown(section["markdown"]))
+            display(Markdown(mathjax_safe_currency(section["markdown"])))
         elif stype == "concept":
             render_concept(self, section)
         elif stype == "problem":

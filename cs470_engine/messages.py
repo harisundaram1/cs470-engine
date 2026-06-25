@@ -4,7 +4,33 @@ Per the project rule that copy and style live in one place (not inline in
 render functions), the durable-session feature's student-facing strings live
 here so wording stays consistent across the notebook intro, the finalize
 confirmation, the empty-session guard, and the restored-answer banner.
+
+Also home to ``mathjax_safe_currency`` — the single shared helper that protects
+authored literal-currency ``\\$`` on the IPython.display.Markdown render path.
 """
+
+
+def mathjax_safe_currency(md_text: str) -> str:
+    r"""Protect an authored literal-currency ``\$`` on the Markdown() path.
+
+    The renderer behind ``IPython.display.Markdown`` is markdown-it
+    (CommonMark), which de-escapes a backslash-escaped ASCII punctuation char.
+    So an authored ``\$`` (a literal dollar sign in prose — "bidding \$100")
+    reaches MathJax as a bare ``$``; MathJax then pairs it with the next ``$``
+    and typesets the run between them as math — collapsed-italic, garbled prose.
+
+    Doubling the backslash survives that pass: markdown-it de-escapes ``\\`` to a
+    single ``\``, leaving ``\$``, which MathJax renders as a literal ``$``.
+
+    SCOPED to the Markdown() path ONLY. The hint path renders through
+    python-markdown + ``HTML()``, which already handles ``\$`` correctly;
+    applying this there would double-escape. Real math delimiters (bare
+    ``$...$``) are untouched — only the two-character sequence backslash-dollar
+    is rewritten, so ``$v$``, ``$r^*$``, ``$-$`` and the rest pass through.
+    """
+    if not isinstance(md_text, str):
+        return md_text
+    return md_text.replace(r"\$", r"\\$")
 
 # Shown in the session-start framing (Worksheet.start) and reinforced in the
 # worksheet intro: how answers get recorded, and what to do after a reopen.
