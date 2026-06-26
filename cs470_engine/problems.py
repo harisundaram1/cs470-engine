@@ -426,6 +426,48 @@ _AUCTION_KINDS = {"auction_table", "bid_payoff_curve", "revenue_curve",
                   "common_value_bids"}
 
 
+def _render_bipartite_market(figure_spec: dict) -> None:
+    """Render a ``kind: bipartite_market`` figure spec (Lesson 4, c10).
+
+    Reads the spec's two node columns + edge source and defers the answer
+    (preferred-seller option edges / optimal assignment / market-clearing
+    matching / constricted set) to ``plot_style.draw_bipartite_market`` — which
+    COMPUTES them from ``valuations``/``prices``, so the drawn figure can't drift
+    from the key. ``reveal: none`` hides everything DERIVED (option edges,
+    matching, constricted highlight), showing only the question's explicit
+    structure — the answer-leak guard, analog of ``mask_winner_price``.
+    """
+    from . import plot_style as ps
+
+    left = figure_spec.get("left") or []
+    right = figure_spec.get("right") or []
+    if not left and not right:
+        print("[engine] bipartite_market figure has no `left`/`right` nodes.")
+        return
+    # Equal-aspect figure; height scales with the taller column so rows breathe.
+    rows = max(len(left), len(right), 1)
+    fig, ax = plt.subplots(figsize=(5.6, max(2.6, 1.0 * rows + 1.4)))
+    ps.draw_bipartite_market(
+        ax,
+        left=left,
+        right=right,
+        edges=figure_spec.get("edges"),
+        derive=figure_spec.get("derive"),
+        prices=figure_spec.get("prices"),
+        valuations=figure_spec.get("valuations"),
+        column_titles=figure_spec.get("column_titles", ("Sellers", "Buyers")),
+        matching=figure_spec.get("matching"),
+        constricted=figure_spec.get("constricted"),
+        open_nodes=figure_spec.get("open_nodes"),
+        edge_style=figure_spec.get("edge_style"),
+        reveal=figure_spec.get("reveal", "edges"),
+        note=figure_spec.get("note"),
+    )
+    plt.tight_layout()
+    display(fig)
+    plt.close(fig)
+
+
 def _render_figure(ws, figure_spec: dict) -> None:
     """Render a YAML figure spec into the current Output context.
 
@@ -463,6 +505,9 @@ def _render_figure(ws, figure_spec: dict) -> None:
         return
     if kind in _AUCTION_KINDS:
         _render_auction(figure_spec)
+        return
+    if kind == "bipartite_market":
+        _render_bipartite_market(figure_spec)
         return
     if kind != "graph":
         print(f"[engine] Figure kind {kind!r} not yet implemented.")
