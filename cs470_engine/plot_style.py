@@ -28,6 +28,7 @@ Aesthetic rules (enforced by scripts/validate.py)
 8. No redundant legends when direct labels work.
 """
 
+import itertools
 import math
 import re
 
@@ -1746,6 +1747,573 @@ def draw_common_value_bids(ax, *, common_value, estimates, note=None):
     if note:
         ax.set_title(note, fontsize=st["annot_fontsize"], color=COLORS["text"])
     return {"winner": winner, "overpay": we - common_value}
+
+
+# -----------------------------------------------------------------------------
+# Matching-market helpers + renderer (Lesson 4, c10)
+# -----------------------------------------------------------------------------
+#
+# Lesson 4 (Matching Markets, c10) follows the same discipline as the Lesson-2
+# payoff matrix and the Lesson-3 auction surface: the *answer* a figure shows —
+# the optimal assignment, the market-clearing matching, the constricted set, the
+# ascending-auction trace — is COMPUTED from the underlying valuations/prices by
+# the pure helpers below, and the renderer (plus the Stage-2 widgets to come)
+# both call them. A figure therefore can never drift from the answer key; the
+# highlight IS the computation.
+#
+# A matching-market figure has one of THREE distinct edge sources, and the
+# renderer serves all three (the helpers supply the latter two):
+#   1. EXPLICIT adjacency  — a plain bipartite graph (Section 10.1 figures);
+#      edges are given, there are no valuations or prices.
+#   2. COMPUTED optimal assignment — the maximum-total-valuation matching, from
+#      valuations alone, no prices (``optimal_assignment``).
+#   3. COMPUTED preferred-seller graph — argmax_j (v_ij - p_j) per buyer, ties
+#      kept, negative-payoff options dropped (``preferred_seller_edges``, and the
+#      market-clearing test / ascending auction built on it).
+#
+# The valuation/price helpers are INDEX-BASED and pure: a buyer is an integer
+# row index, a seller an integer column index, ``valuations[buyer][seller]`` the
+# buyer's value for that seller's item, ``prices[seller]`` the seller's price.
+# They return plain dicts/lists of indices; mapping indices back to node labels
+# is the renderer's job. ``find_constricted_set`` is the exception — it is
+# generic over node identity (any hashable), since it also serves the
+# explicit-adjacency figures.
+
+
+# --- compute helpers (single source of truth) --------------------------------
+
+def preferred_seller_edges(valuations, prices):
+    """Each buyer's preferred seller(s) at the given prices (Section 10.3).
+
+    For buyer ``i`` the payoff from seller ``j`` is ``valuations[i][j] -
+    prices[j]``; the buyer's preferred sellers are the ones MAXIMIZING that
+    payoff. Ties are KEPT (a buyer can have several preferred sellers). Options
+    with NEGATIVE payoff are dropped, so a buyer for whom every payoff is
+    negative has no preferred seller at all (an empty list) — matching the text's
+    "buyer ``j`` has no preferred seller if the payoffs ``v_ij - p_i`` are
+    negative for all ``i``."
+
+    Returns ``{buyer_index: [seller_index, ...]}`` for every buyer (the list is
+    empty when the buyer prefers no one).
+    """
+    prefs = {}
+    for i, row in enumerate(valuations):
+        surplus = [row[j] - prices[j] for j in range(len(row))]
+        best = max(surplus) if surplus else None
+        if best is None or best < 0:
+            prefs[i] = []
+        else:
+            prefs[i] = [j for j, s in enumerate(surplus) if s == best]
+    return prefs
+
+
+def _bipartite_matching(left, adj):
+    """Maximum-cardinality bipartite matching via augmenting paths (Kuhn's).
+
+    ``left`` is the list of left nodes (any hashable); ``adj`` maps each left
+    node to an iterable of right nodes. Returns ``match_right``, a dict mapping
+    each MATCHED right node to its left partner. The left->right view is
+    ``{l: r for r, l in match_right.items()}``; the matching is perfect (covers
+    every left node) iff ``len(match_right) == len(left)``. Deterministic given a
+    fixed ``left`` order and adjacency order.
+    """
+    match_right = {}
+
+    def _augment(u, seen):
+        for v in adj.get(u, ()):
+            if v in seen:
+                continue
+            seen.add(v)
+            if v not in match_right or _augment(match_right[v], seen):
+                match_right[v] = u
+                return True
+        return False
+
+    for u in left:
+        _augment(u, set())
+    return match_right
+
+
+def is_market_clearing(valuations, prices):
+    """Are these prices market-clearing? If so, return a clearing matching.
+
+    Builds the preferred-seller graph at ``prices`` and tests whether it admits a
+    perfect matching — every buyer assigned a distinct preferred seller (Hall's
+    condition, Section 10.3). Returns ``(True, {buyer: seller})`` when it clears
+    (one valid clearing assignment, since ties can leave several), else
+    ``(False, None)``.
+    """
+    prefs = preferred_seller_edges(valuations, prices)
+    buyers = list(range(len(valuations)))
+    match_right = _bipartite_matching(buyers, prefs)
+    if len(match_right) == len(buyers):
+        return True, {l: r for r, l in match_right.items()}
+    return False, None
+
+
+def optimal_assignment(valuations):
+    """Maximum-total-valuation assignment of objects to agents (Section 10.2).
+
+    ``valuations[i][j]`` is agent ``i``'s value for object ``j``. Returns the
+    injective assignment ``{agent_index: object_index}`` maximizing the summed
+    valuation — the social-welfare-maximizing ("optimal") matching. Brute-forced
+    over injective assignments: exact, and the worksheets' markets are small
+    (n <= 5). Ties break to the lexicographically-first arg-max (deterministic).
+    """
+    n = len(valuations)
+    if n == 0:
+        return {}
+    m = len(valuations[0])
+    best_total, best = None, None
+    for perm in itertools.permutations(range(m), n):
+        total = sum(valuations[i][perm[i]] for i in range(n))
+        if best_total is None or total > best_total:
+            best_total, best = total, {i: perm[i] for i in range(n)}
+    return best
+
+
+def find_constricted_set(left, right, edges):
+    """A constricted set witnessing the absence of a perfect matching (Hall).
+
+    ``left`` / ``right`` are node-id lists (any hashable); ``edges`` an iterable
+    of ``(left_node, right_node)`` pairs. A set ``S`` of left nodes is
+    *constricted* when ``|S| > |N(S)|`` — strictly more left nodes than the right
+    nodes they collectively touch (Section 10.1's obstacle to a perfect
+    matching). Returns ``(S, N(S))`` as two lists (each ordered as in ``left`` /
+    ``right``) when no perfect matching exists, or ``None`` when one does.
+
+    The witness is the canonical Konig set: take a maximum matching, then the
+    left/right nodes reachable by alternating paths from the UNMATCHED left
+    nodes. This is the tightest deficient set tied to the matching, and it is
+    exactly the neighborhood the ascending auction must raise prices on — so the
+    same routine drives ``ascending_auction_rounds``. (Other constricted sets can
+    exist; this returns one valid witness, not necessarily the largest.)
+    """
+    adj = {u: [] for u in left}
+    for u, v in edges:
+        adj[u].append(v)
+    match_right = _bipartite_matching(left, adj)
+    if len(match_right) == len(left):
+        return None
+    matched_left = set(match_right.values())
+    # Alternating BFS from every unmatched left node: left->right along ANY edge,
+    # right->left along the matching edge only.
+    reach_left = set(u for u in left if u not in matched_left)
+    reach_right = set()
+    stack = list(reach_left)
+    while stack:
+        u = stack.pop()
+        for v in adj[u]:
+            if v in reach_right:
+                continue
+            reach_right.add(v)
+            w = match_right.get(v)
+            if w is not None and w not in reach_left:
+                reach_left.add(w)
+                stack.append(w)
+    S = [u for u in left if u in reach_left]
+    NS = [v for v in right if v in reach_right]
+    return S, NS
+
+
+def auction_potential(valuations, prices):
+    """Potential energy of the auction at the current prices (Section 10.4).
+
+    The text's "potential energy" is the sum of every participant's potential
+    payoff: each seller's potential is the price he charges, each buyer's is the
+    maximum payoff ``max_j (v_ij - p_j)`` she can currently get. So the potential
+    is ``sum(prices) + sum_i max_j (valuations[i][j] - prices[j])``. It starts at
+    a whole number ``P0 >= 0`` and strictly decreases every round the auction
+    raises prices, which is why the auction must terminate.
+    """
+    total = sum(prices)
+    for row in valuations:
+        total += max(row[j] - prices[j] for j in range(len(row)))
+    return total
+
+
+def ascending_auction_rounds(valuations):
+    """Trace of the Demange-Gale-Sotomayor ascending auction (Section 10.4).
+
+    All sellers start at price 0. Each round: build the preferred-seller graph;
+    if it clears (perfect matching) the auction stops; otherwise take a
+    constricted set ``S`` of buyers and raise every price in ``N(S)`` by one unit,
+    then subtract the minimum price from all so the lowest price stays 0 (the
+    text's price-reduction step — it never triggers while some seller sits at 0,
+    but keeps the trace canonical in general). Returns one dict per round::
+
+        {"prices": [...], "potential": P, "raised_set": [seller, ...],
+         "matching": {buyer: seller} | None}
+
+    ``raised_set`` lists the sellers whose price this round raises (empty on the
+    final, clearing round); ``matching`` is ``None`` until the clearing round,
+    where it holds the market-clearing assignment. The potential strictly
+    decreases until clearing.
+    """
+    n = len(valuations)
+    m = len(valuations[0]) if n else 0
+    prices = [0 for _ in range(m)]
+    buyers = list(range(n))
+    sellers = list(range(m))
+    rounds = []
+    maxval = max((max(row) for row in valuations), default=0)
+    # The potential strictly decreases and no price exceeds the max valuation, so
+    # the auction always clears well within this many rounds; the bound is a
+    # defensive backstop, not the termination argument.
+    for _ in range((maxval + 2) * m + n + 2):
+        prefs = preferred_seller_edges(valuations, prices)
+        match_right = _bipartite_matching(buyers, prefs)
+        potential = auction_potential(valuations, prices)
+        if len(match_right) == n:
+            rounds.append({"prices": list(prices), "potential": potential,
+                           "raised_set": [],
+                           "matching": {l: r for r, l in match_right.items()}})
+            return rounds
+        edges = [(b, s) for b, ss in prefs.items() for s in ss]
+        S, NS = find_constricted_set(buyers, sellers, edges)
+        rounds.append({"prices": list(prices), "potential": potential,
+                       "raised_set": list(NS), "matching": None})
+        for s in NS:
+            prices[s] += 1
+        low = min(prices) if prices else 0
+        if low > 0:
+            prices = [p - low for p in prices]
+    return rounds
+
+
+# --- renderer: bipartite matching market -------------------------------------
+
+#: Matching-market figure styling (Lesson 4). Centralized — no inline literals in
+#: the renderer. Every color DISTINCTION maps to a palette token, never raw hex:
+#:   * left vs right partition  -> two-tone node borders (primary / quaternary);
+#:   * open / fictitious nodes  -> faint dashed border + dashed edges (Fig 10.7);
+#:   * constricted-set highlight -> accent border emphasis, distinct from fill;
+#:   * matching vs option edges -> Arches bold-solid vs navy dashed.
+BIPARTITE_STYLE = {
+    "col_gap":          2.6,    # x-distance between the two node columns
+    "row_gap":          1.0,    # y-distance between adjacent nodes in a column
+    "node_radius":      0.20,   # node circle radius (data units; aspect equal)
+    "node_fill":        "white",          # open-circle look (cf. GRAPH_STYLE)
+    "left_edge_color":  COLORS["primary"],     # left partition border (navy)
+    "right_edge_color": COLORS["quaternary"],  # right partition border (caramel)
+    "node_edge_width":  2.0,
+    "label_fontsize":        13,   # names placed BESIDE the node
+    "inside_label_fontsize": 11,   # short ids drawn INSIDE the circle — smaller
+                                   # so single digits/letters clear the node edge
+    # option / preference edges vs the matching (answer) edges
+    "edge_color":         COLORS["primary"],
+    "edge_width":         1.5,
+    "dashed_on_off":      (0, (4, 3)),    # dash pattern for option/open edges
+    "match_edge_color":   COLORS["highlight"],   # Arches — the chosen matching
+    "match_edge_width":   2.8,
+    # open / fictitious nodes (Fig 10.7 auction panel)
+    "open_edge_color":  COLORS["minor_tick"],
+    # constricted-set highlight (border emphasis, distinct from fill)
+    "constricted_color":  COLORS["accent"],
+    "constricted_width":  3.0,
+    "constricted_radius_delta": 0.035,
+    # side-column annotations + titles
+    "title_fontsize":   12,
+    "annot_fontsize":   11,
+    "price_color":      COLORS["accent"],
+    "note_fontsize":    10,
+}
+
+
+def _bipartite_vector_label(vec):
+    """Mathtext ``$[a,\\ b,\\ c]$`` for a valuation vector (no Unicode minus)."""
+    return "$[" + ",\\ ".join(_fmt_num(v) for v in vec) + "]$"
+
+
+def draw_bipartite_market(
+    ax,
+    *,
+    left,
+    right,
+    edges=None,
+    derive=None,
+    prices=None,
+    valuations=None,
+    column_titles=("Sellers", "Buyers"),
+    matching=None,
+    constricted=None,
+    open_nodes=None,
+    edge_style=None,
+    reveal="edges",
+    note=None,
+):
+    """Render a bipartite matching market (Lesson 4, c10); answer COMPUTED.
+
+    A stateless, side-neutral two-column bipartite figure. ``left`` and ``right``
+    are node-id lists (any hashable; ids are formatted with ``subscript_label``,
+    so ``m2`` -> m_2 while names pass through). The figure serves the THREE edge
+    semantics of c10 (see the module helpers): explicit adjacency, the computed
+    optimal assignment, and the computed preferred-seller graph.
+
+    Edge source — pick ONE:
+
+    - ``derive=None`` (default): the bipartite structure is the explicit
+      ``edges`` (a list of ``(left_id, right_id)`` pairs) — Section 10.1's plain
+      adjacency graph. Drawn solid.
+    - ``derive="optimal_assignment"``: the max-total-valuation matching is
+      computed from ``valuations`` alone (no prices) and drawn as the bold
+      matching. Convention: the RIGHT column is the valuing side (one valuation
+      vector per right node, ``valuations[right_index]``), the LEFT column the
+      objects.
+    - ``derive="preferred_seller"``: the preferred-seller graph
+      ``argmax_j (v_ij - p_j)`` is computed from ``valuations`` + ``prices`` and
+      drawn as dashed option edges. Convention: LEFT = sellers (aligned to
+      ``prices``), RIGHT = buyers (aligned to ``valuations`` rows). With
+      ``matching="auto"`` the market-clearing matching (if any) is overlaid bold.
+
+    Annotations align to node rows: ``prices`` is the outer-LEFT column (one per
+    left node), ``valuations`` the outer-RIGHT column (one vector per right
+    node). ``matching`` is an explicit list of ``(left_id, right_id)`` pairs to
+    bold, or ``"auto"`` to derive; ``constricted`` is an explicit ``(S, N(S))``
+    pair of id-lists to highlight, or ``"auto"`` to derive via
+    ``find_constricted_set``. ``open_nodes`` lists fictitious/empty nodes (drawn
+    unfilled with a faint dashed border and dashed incident edges, e.g. the
+    Fig 10.7 auction panel). ``edge_style`` is a per-edge
+    ``{(l, r): "solid"|"dashed"}`` override.
+
+    ``reveal`` is the answer-leak guard (analog of ``mask_winner_price``):
+
+    - ``"edges"`` (default): show everything — explicit edges, derived option
+      edges, the bold matching, and the constricted highlight.
+    - ``"none"``: show only the explicit ``edges`` (the question's given
+      structure), the nodes, and the side columns. Everything DERIVED — the
+      preferred-seller option edges, the matching, the constricted highlight — is
+      hidden, so the figure can pose the question without leaking its answer.
+
+    Side-neutral: the draw core never assumes which column is sellers/people;
+    ``column_titles`` and the pricing semantics live in the caller. Returns a
+    dict ``{"edges", "matching", "constricted", "clears"}`` recording what was
+    computed (handy for Stage-2 widget wrappers and tests).
+    """
+    if reveal not in ("edges", "none"):
+        raise ValueError(f"reveal must be 'edges' or 'none', got {reveal!r}")
+    st = BIPARTITE_STYLE
+    left = list(left)
+    right = list(right)
+    open_set = set(open_nodes or [])
+
+    # --- resolve edge sources (derive when asked) -------------------------
+    explicit_edges = [tuple(e) for e in (edges or [])]
+    derived_options = []          # dashed preference edges (preferred_seller)
+    matching_pairs = []           # bold matching edges
+    clears = None
+
+    if derive == "preferred_seller":
+        prefs = preferred_seller_edges(valuations, prices)
+        derived_options = [(left[s], right[b])
+                           for b, ss in prefs.items() for s in ss]
+        if matching == "auto":
+            clears, mm = is_market_clearing(valuations, prices)
+            if mm:
+                matching_pairs = [(left[s], right[b]) for b, s in mm.items()]
+    elif derive == "optimal_assignment":
+        assign = optimal_assignment(valuations)
+        matching_pairs = [(left[o], right[a]) for a, o in assign.items()]
+    elif derive is not None:
+        raise ValueError(
+            "derive must be None, 'preferred_seller', or 'optimal_assignment', "
+            f"got {derive!r}")
+
+    # explicit matching (only when not auto-derived)
+    if isinstance(matching, str):
+        if matching != "auto":
+            raise ValueError(f"matching must be a list or 'auto', got {matching!r}")
+    elif matching is not None:
+        matching_pairs = [tuple(e) for e in matching]
+
+    # constricted set: explicit (S, N(S)) or "auto". For a priced market the
+    # Hall-violating side is the BUYERS (right) — a set of buyers chasing too few
+    # preferred sellers, exactly why prices don't clear — so derive it there; for
+    # a plain adjacency graph it is the left side, find_constricted_set's native
+    # orientation. Highlighting itself is side-agnostic (it keys off node ids).
+    constr = None
+    if constricted == "auto":
+        if derive == "preferred_seller":
+            rev = [(r, l) for (l, r) in derived_options]
+            constr = find_constricted_set(right, left, rev)
+        else:
+            constr = find_constricted_set(left, right,
+                                          explicit_edges + derived_options)
+    elif constricted is not None:
+        constr = (list(constricted[0]), list(constricted[1]))
+
+    # --- answer-leak guard ------------------------------------------------
+    # Explicit edges are the QUESTION'S structure (always shown). Everything
+    # derived (preference edges, matching, constricted highlight) is the ANSWER.
+    if reveal == "none":
+        option_edges = [(l, r, "solid") for (l, r) in explicit_edges]
+        shown_matching = []
+        shown_constr = None
+    else:
+        option_edges = ([(l, r, "solid") for (l, r) in explicit_edges]
+                        + [(l, r, "dashed") for (l, r) in derived_options])
+        shown_matching = list(matching_pairs)
+        shown_constr = constr
+
+    # per-edge style override
+    def _style_of(l, r, default):
+        if edge_style:
+            s = edge_style.get((l, r)) or edge_style.get((r, l))
+            if s:
+                return s
+        return default
+
+    match_set = {tuple(sorted(map(str, e))) for e in shown_matching}
+    S_set = set(shown_constr[0]) if shown_constr else set()
+
+    # --- geometry ---------------------------------------------------------
+    nL, nR = len(left), len(right)
+    G = st["row_gap"]
+    x_left, x_right = 0.0, st["col_gap"]
+    R = st["node_radius"]
+
+    def _col_y(n, i):
+        return ((n - 1) / 2.0 - i) * G
+
+    pos_left = {left[i]: (x_left, _col_y(nL, i)) for i in range(nL)}
+    pos_right = {right[j]: (x_right, _col_y(nR, j)) for j in range(nR)}
+
+    # Short ids (<= 2 chars: a/b/c, x/y/z, room numbers) sit INSIDE the node;
+    # longer labels (names) sit BESIDE it on the outer side so they never spill
+    # over the circle. Annotation columns are then pushed out past the labels.
+    label_pad, name_room = 0.16, 1.25
+    left_inside = nL > 0 and max(len(str(n)) for n in left) <= 2
+    right_inside = nR > 0 and max(len(str(n)) for n in right) <= 2
+
+    if left_inside:
+        left_label_x, left_label_ha = x_left, "center"
+        price_x = x_left - 0.55
+        left_edge = (price_x - 0.4) if prices is not None else (x_left - R - 0.4)
+    else:
+        left_label_x, left_label_ha = x_left - (R + label_pad), "right"
+        price_x = left_label_x - name_room
+        left_edge = (price_x - 0.4) if prices is not None \
+            else (left_label_x - name_room)
+    if right_inside:
+        right_label_x, right_label_ha = x_right, "center"
+        val_x = x_right + 0.5
+        right_edge = (val_x + 1.7) if valuations is not None else (x_right + R + 0.4)
+    else:
+        right_label_x, right_label_ha = x_right + (R + label_pad), "left"
+        val_x = right_label_x + name_room
+        right_edge = (val_x + 1.7) if valuations is not None \
+            else (right_label_x + name_room)
+
+    ax.set_aspect("equal")
+    top = max(_col_y(nL, 0) if nL else 0.0, _col_y(nR, 0) if nR else 0.0)
+    bot = min(_col_y(nL, nL - 1) if nL else 0.0, _col_y(nR, nR - 1) if nR else 0.0)
+    ax.set_xlim(left_edge, right_edge)
+    ax.set_ylim(bot - 0.95, top + 1.1)
+    ax.autoscale(False)
+    ax.set_axis_off()
+
+    # --- edges ------------------------------------------------------------
+    def _draw_edge(l, r, *, color, width, style, zorder):
+        if l not in pos_left or r not in pos_right:
+            return
+        x0, y0 = pos_left[l]
+        x1, y1 = pos_right[r]
+        ax.plot([x0, x1], [y0, y1], color=color, linewidth=width,
+                linestyle=style, zorder=zorder, solid_capstyle="round")
+
+    def _ls(name):
+        return st["dashed_on_off"] if name == "dashed" else "-"
+
+    for (l, r, default) in option_edges:
+        if tuple(sorted((str(l), str(r)))) in match_set:
+            continue  # drawn bold below; don't double-draw under it
+        is_open = l in open_set or r in open_set
+        style = _ls("dashed") if is_open else _ls(_style_of(l, r, default))
+        color = st["open_edge_color"] if is_open else st["edge_color"]
+        _draw_edge(l, r, color=color, width=st["edge_width"], style=style,
+                   zorder=1)
+
+    # constricted emphasis: edges incident to S (either endpoint, so it works
+    # whether S is the left or the right partition) drawn accent.
+    if shown_constr:
+        for (l, r, _d) in option_edges:
+            if l in S_set or r in S_set:
+                _draw_edge(l, r, color=st["constricted_color"],
+                           width=st["edge_width"] + 0.6, style="-", zorder=1.5)
+
+    # matching (the answer): bold Arches solid
+    for (l, r) in shown_matching:
+        _draw_edge(l, r, color=st["match_edge_color"],
+                   width=st["match_edge_width"], style="-", zorder=2)
+
+    # --- nodes ------------------------------------------------------------
+    from matplotlib.patches import Circle
+
+    def _draw_node(nid, x, y, base_color, label_x, label_ha):
+        is_open = nid in open_set
+        is_constr = nid in S_set or (shown_constr and nid in set(shown_constr[1]))
+        if is_constr:
+            ax.add_patch(Circle(
+                (x, y), R + st["constricted_radius_delta"],
+                facecolor=st["node_fill"], edgecolor=st["constricted_color"],
+                linewidth=st["constricted_width"], zorder=3))
+        else:
+            ax.add_patch(Circle(
+                (x, y), R, facecolor=st["node_fill"],
+                edgecolor=(st["open_edge_color"] if is_open else base_color),
+                linewidth=st["node_edge_width"], zorder=3,
+                linestyle=(st["dashed_on_off"] if is_open else "-")))
+        # Short ids sit INSIDE the circle (ha="center") and must clear the node
+        # edge, so they use the smaller inside_label_fontsize; names placed
+        # BESIDE the node (ha="left"/"right") keep the full label_fontsize.
+        inside = label_ha == "center"
+        ax.text(label_x, y, subscript_label(nid), ha=label_ha, va="center",
+                fontsize=st["inside_label_fontsize"] if inside
+                else st["label_fontsize"],
+                color=COLORS["text"], zorder=4)
+
+    for nid, (x, y) in pos_left.items():
+        _draw_node(nid, x, y, st["left_edge_color"], left_label_x, left_label_ha)
+    for nid, (x, y) in pos_right.items():
+        _draw_node(nid, x, y, st["right_edge_color"], right_label_x, right_label_ha)
+
+    # --- side columns (aligned to node rows) ------------------------------
+    if prices is not None:
+        for i in range(min(nL, len(prices))):
+            _, y = pos_left[left[i]]
+            ax.text(price_x, y, _fmt_num(prices[i]),
+                    ha="right", va="center", fontsize=st["annot_fontsize"],
+                    color=st["price_color"], zorder=4)
+        ax.text(price_x, top + 0.5, "price", ha="right", va="bottom",
+                fontsize=st["annot_fontsize"], color=st["price_color"],
+                style="italic", zorder=4)
+    if valuations is not None:
+        for j in range(min(nR, len(valuations))):
+            _, y = pos_right[right[j]]
+            ax.text(val_x, y, _bipartite_vector_label(valuations[j]),
+                    ha="left", va="center", fontsize=st["annot_fontsize"],
+                    color=COLORS["text"], zorder=4)
+        ax.text(val_x, top + 0.5, "valuations", ha="left", va="bottom",
+                fontsize=st["annot_fontsize"], color=COLORS["text"],
+                style="italic", zorder=4)
+
+    # --- column titles + note --------------------------------------------
+    lt, rt = column_titles
+    ax.text(x_left, top + 0.74, str(lt), ha="center", va="bottom",
+            fontsize=st["title_fontsize"], fontweight="bold",
+            color=COLORS["primary"], zorder=4)
+    ax.text(x_right, top + 0.74, str(rt), ha="center", va="bottom",
+            fontsize=st["title_fontsize"], fontweight="bold",
+            color=COLORS["primary"], zorder=4)
+    if note:
+        ax.text((x_left + x_right) / 2.0, bot - 0.7, str(note),
+                ha="center", va="top", fontsize=st["note_fontsize"],
+                color=COLORS["text"], zorder=4)
+
+    return {"edges": [(l, r) for (l, r, _s) in option_edges],
+            "matching": list(shown_matching),
+            "constricted": shown_constr,
+            "clears": clears}
 
 
 # -----------------------------------------------------------------------------
