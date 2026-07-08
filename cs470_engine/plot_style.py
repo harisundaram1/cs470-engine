@@ -1128,6 +1128,18 @@ def _fmt_num(v):
     return s.replace("-", "{-}")
 
 
+def _fmt_num_plain(v):
+    """Compact PLAIN-TEXT number (no mathtext): int when integral, else up to
+    3 decimals. Unlike ``_fmt_num`` it emits a plain ASCII minus and NO ``$…$``
+    / ``{-}`` mathtext — with ``axes.unicode_minus=False`` the ``-`` stays in
+    the sans body font. Use for labels drawn OUTSIDE a math context (the
+    bipartite_market valuation/price columns) so they can never collide with
+    matplotlib's ``$`` mathtext parser."""
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    return f"{v:.3f}".rstrip("0").rstrip(".") if isinstance(v, float) else f"{v}"
+
+
 # --- compute helpers (single source of truth) --------------------------------
 
 def auction_outcome(bids, *, fmt="second_price", reserve=None):
@@ -2021,8 +2033,14 @@ BIPARTITE_STYLE = {
 
 
 def _bipartite_vector_label(vec):
-    """Mathtext ``$[a,\\ b,\\ c]$`` for a valuation vector (no Unicode minus)."""
-    return "$[" + ",\\ ".join(_fmt_num(v) for v in vec) + "]$"
+    """Plain-text ``[a, b, c]`` for a valuation vector — NO mathtext.
+
+    Deliberately unwrapped (no ``$…$``): these are bracketed integer vectors,
+    not math, so plain text loses nothing — and it makes the ``$$`` double-wrap
+    that crashes matplotlib's mathtext parser impossible by construction (a
+    string with no ``$`` cannot be re-wrapped into one). Uses ``_fmt_num_plain``
+    so a negative value renders a clean ``-3``, not ``_fmt_num``'s ``{-}3``."""
+    return "[" + ", ".join(_fmt_num_plain(v) for v in vec) + "]"
 
 
 def draw_bipartite_market(
@@ -2281,7 +2299,7 @@ def draw_bipartite_market(
     if prices is not None:
         for i in range(min(nL, len(prices))):
             _, y = pos_left[left[i]]
-            ax.text(price_x, y, _fmt_num(prices[i]),
+            ax.text(price_x, y, _fmt_num_plain(prices[i]),
                     ha="right", va="center", fontsize=st["annot_fontsize"],
                     color=st["price_color"], zorder=4)
         ax.text(price_x, top + 0.5, "price", ha="right", va="bottom",
