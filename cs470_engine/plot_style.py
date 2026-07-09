@@ -31,6 +31,7 @@ Aesthetic rules (enforced by scripts/validate.py)
 import itertools
 import math
 import re
+from fractions import Fraction
 
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
@@ -100,6 +101,14 @@ GRAPH_STYLE = {
     "highlight_edge_color":    COLORS["accent"],
     "weak_edge_style":         "dashed",
 
+    # Matched-edge token (network-exchange outcomes, Lesson 5): bold BLACK,
+    # rendering the "darkened edges" the chapter uses to mark a matching. It is
+    # a SEPARATE token from highlight_edge_* on purpose — matched edges (bold
+    # black) and highlighted edges/nodes (accent orange) carry different meaning
+    # and can appear in the SAME figure, so they must stay visually distinct.
+    "matched_edge_width":      3.0,
+    "matched_edge_color":      COLORS["text"],   # black — distinct from accent
+
     # Missing-edge marker (drawn by draw_missing_edge)
     "missing_edge_style":      "dotted",
     "missing_edge_color":      COLORS["accent"],
@@ -127,6 +136,21 @@ GRAPH_STYLE = {
     # primary label so they don't compete visually, but readable.
     "annotation_font_size":         11,    # single-line inline text
     "annotation_font_size_compact": 10,    # multi-line / tighter contexts
+
+    # Bargaining-outcome annotations (Lesson 5). Node VALUES sit above each node,
+    # OUTSIDE OPTIONS below; both are PLAIN text (never $-wrapped — see the L4
+    # plain-integer/fraction rule). Vertical offset is in typographic points
+    # (layout-scale-independent) added to the node radius so text clears the
+    # circle regardless of node_size.
+    "value_annotation_size":   12,
+    "value_annotation_gap":    6,     # points of clearance beyond the node radius
+    # Outside-option pendant stub: a short dashed half-edge dangling from a node
+    # toward its outside-option label (cf. Figures 12.6/12.8/12.9). Its length is
+    # a fraction of the median graph edge length, so it scales with the layout.
+    "pendant_stub_style":      "dashed",
+    "pendant_stub_color":      COLORS["primary"],
+    "pendant_stub_width":      1.5,
+    "pendant_stub_frac":       0.38,
 }
 
 
@@ -526,6 +550,25 @@ def draw_directed_graph(G, ax, *, pos, labels=None, node_size=None,
 # Graph rendering helper
 # -----------------------------------------------------------------------------
 
+def _exchange_value_label(v):
+    """Plain-text label for a bargaining value / outside option — NO mathtext.
+
+    Renders the small rationals that network-exchange outcomes use ("0", "1",
+    "1/2", "1/3", "2/3", "1/4", "3/4") as PLAIN text — never ``$\\frac{..}{..}$``
+    and never $-wrapped — echoing the Lesson-4 rule that plain integer/fraction
+    labels must not go through mathtext (the double-wrap crash class). A string
+    passes through verbatim; an int/float/Fraction is converted to a "p/q" (or
+    "p") string, snapping floats to a small-denominator fraction when one matches
+    closely so 0.3333.. renders as "1/3".
+    """
+    if isinstance(v, str):
+        return v
+    frac = Fraction(v).limit_denominator(1000)
+    if frac.denominator == 1:
+        return str(frac.numerator)
+    return f"{frac.numerator}/{frac.denominator}"
+
+
 def draw_graph(
     G,
     ax,
@@ -537,6 +580,10 @@ def draw_graph(
     seed=42,
     node_size=None,
     show_labels=True,
+    matched_edges=None,
+    node_values=None,
+    outside_options=None,
+    pendant_stub=False,
 ):
     """Draw a networkx graph in the project's style.
 
@@ -551,6 +598,12 @@ def draw_graph(
     mathtext label at the curved-arc apex. The Arches highlight color marks a
     highlighted signed edge. Edges WITHOUT a ``sign`` attribute are completely
     unaffected by this and render exactly as before.
+
+    The ``matched_edges`` / ``node_values`` / ``outside_options`` / ``pendant_stub``
+    parameters are an ADDITIVE Lesson-5 network-exchange layer: they annotate an
+    outcome (a matching + node values + endogenous outside options) on top of an
+    ordinary structure figure. They all default off, and when unused the output
+    is byte-identical to the pre-Lesson-5 renderer.
 
     Parameters
     ----------
@@ -575,6 +628,25 @@ def draw_graph(
         Default node marker size.
     show_labels : bool
         Whether to draw node labels.
+    matched_edges : list of tuples, optional
+        Edges of a network-exchange matching, drawn with the **bold-black
+        matched-edge token** (``GRAPH_STYLE["matched_edge_*"]``). This is a
+        distinct token from ``highlight_edges`` (accent orange), so a figure can
+        show a matching in bold black AND highlight some node/edge in accent at
+        the same time. Either orientation accepted. If a matched edge is also in
+        ``highlight_edges`` it is drawn bold-and-accent (bold width, accent
+        color); normally the two sets are disjoint.
+    node_values : dict, optional
+        Mapping ``node -> value`` (the outcome's split, e.g. ``Fraction(1, 3)``
+        or ``"1/3"``), drawn as a PLAIN-text annotation ABOVE the node. Numbers
+        are formatted via ``_exchange_value_label`` (no ``$``/mathtext).
+    outside_options : dict, optional
+        Mapping ``node -> value`` drawn as a PLAIN-text annotation BELOW the
+        node — the node's best outside option in the outcome.
+    pendant_stub : bool
+        When True, each node in ``outside_options`` also gets a short dashed
+        "pendant stub" half-edge dangling toward its outside-option label
+        (cf. Figures 12.6/12.8/12.9). No effect unless ``outside_options`` is set.
 
     Returns
     -------
@@ -589,6 +661,9 @@ def draw_graph(
     edge_styles = edge_styles or {}
     highlight_nodes = highlight_nodes or []
     highlight_edges = highlight_edges or []
+    matched_edges = matched_edges or []
+    node_values = node_values or {}
+    outside_options = outside_options or {}
 
     def _style_for(u, v):
         explicit = edge_styles.get((u, v)) or edge_styles.get((v, u))
@@ -603,6 +678,13 @@ def draw_graph(
     highlight_set = {tuple(sorted((u, v))) for u, v in highlight_edges}
     def _is_highlighted(u, v):
         return tuple(sorted((u, v))) in highlight_set
+
+    # Matched edges (network-exchange outcome). Empty by default, so the two
+    # `_is_matched` filters below are no-ops and the legacy partition is
+    # byte-identical unless a caller actually passes matched_edges.
+    matched_set = {tuple(sorted((u, v))) for u, v in matched_edges}
+    def _is_matched(u, v):
+        return tuple(sorted((u, v))) in matched_set
 
     # Signed edges (structural-balance figures) get the curve + apex-label +
     # sign-color treatment. Edges WITHOUT a `sign` attribute fall through to the
@@ -625,10 +707,17 @@ def draw_graph(
     dashed_all = [(u, v) for u, v in unsigned
                   if _style_for(u, v) == GRAPH_STYLE["weak_edge_style"]]
 
-    base_solid = [e for e in solid_all if not _is_highlighted(*e)]
-    base_dashed = [e for e in dashed_all if not _is_highlighted(*e)]
-    hl_solid = [e for e in solid_all if _is_highlighted(*e)]
-    hl_dashed = [e for e in dashed_all if _is_highlighted(*e)]
+    # Matched edges are pulled OUT of the legacy passes and drawn with the
+    # bold-black matched token below. `_is_matched` is always False when no
+    # matched_edges were passed, so these filters change nothing by default.
+    base_solid = [e for e in solid_all
+                  if not _is_highlighted(*e) and not _is_matched(*e)]
+    base_dashed = [e for e in dashed_all
+                   if not _is_highlighted(*e) and not _is_matched(*e)]
+    hl_solid = [e for e in solid_all
+                if _is_highlighted(*e) and not _is_matched(*e)]
+    hl_dashed = [e for e in dashed_all
+                 if _is_highlighted(*e) and not _is_matched(*e)]
 
     if base_solid:
         nx.draw_networkx_edges(
@@ -655,6 +744,27 @@ def draw_graph(
             edge_color=GRAPH_STYLE["highlight_edge_color"],
             width=GRAPH_STYLE["highlight_edge_width"],
             style=GRAPH_STYLE["weak_edge_style"],
+        )
+
+    # Matched-edge pass (bold BLACK). Drawn as bold solid regardless of the
+    # edge's default style, echoing the chapter's "darkened edges". A matched
+    # edge that is ALSO highlighted keeps the bold width but takes the accent
+    # color, so "emphasize a matched edge" stays legible; normally the matched
+    # and highlight sets are disjoint. Skipped entirely (lists empty) by default.
+    matched_present = [(u, v) for u, v in unsigned if _is_matched(u, v)]
+    matched_plain = [e for e in matched_present if not _is_highlighted(*e)]
+    matched_hl = [e for e in matched_present if _is_highlighted(*e)]
+    if matched_plain:
+        nx.draw_networkx_edges(
+            G, pos, ax=ax, edgelist=matched_plain,
+            edge_color=GRAPH_STYLE["matched_edge_color"],
+            width=GRAPH_STYLE["matched_edge_width"],
+        )
+    if matched_hl:
+        nx.draw_networkx_edges(
+            G, pos, ax=ax, edgelist=matched_hl,
+            edge_color=GRAPH_STYLE["highlight_edge_color"],
+            width=GRAPH_STYLE["matched_edge_width"],
         )
 
     # Nodes: highlighted ones drawn with thicker accent-color edge
@@ -685,6 +795,63 @@ def draw_graph(
             font_family=GRAPH_STYLE["label_font_family"],
             font_size=GRAPH_STYLE["label_font_size"],
         )
+
+    # Bargaining-outcome annotations (Lesson 5). Both default off. Offsets are in
+    # typographic points added to the node radius so text clears the circle at
+    # any node_size; annotation_clip=False keeps them visible past the (invisible)
+    # axes frame under the project's tight bbox at save/inline time.
+    if node_values or outside_options:
+        radius_pts = math.sqrt(node_size / math.pi)
+        annot_offset = radius_pts + GRAPH_STYLE["value_annotation_gap"]
+
+    if node_values:
+        for node, val in node_values.items():
+            if node not in pos:
+                continue
+            x, y = pos[node]
+            ax.annotate(
+                _exchange_value_label(val), xy=(x, y),
+                textcoords="offset points", xytext=(0, annot_offset),
+                ha="center", va="bottom", annotation_clip=False,
+                fontsize=GRAPH_STYLE["value_annotation_size"],
+                family="sans-serif", color=COLORS["text"],
+            )
+
+    if outside_options:
+        stub_len = None
+        if pendant_stub:
+            lens = sorted(math.dist(pos[u], pos[v]) for u, v in G.edges())
+            median_len = lens[len(lens) // 2] if lens else 1.0
+            stub_len = GRAPH_STYLE["pendant_stub_frac"] * median_len
+        for node, val in outside_options.items():
+            if node not in pos:
+                continue
+            x, y = pos[node]
+            label = _exchange_value_label(val)
+            if pendant_stub:
+                y_end = y - stub_len
+                ax.plot(
+                    [x, x], [y, y_end],
+                    linestyle=GRAPH_STYLE["pendant_stub_style"],
+                    color=GRAPH_STYLE["pendant_stub_color"],
+                    linewidth=GRAPH_STYLE["pendant_stub_width"],
+                    zorder=0,
+                )
+                ax.annotate(
+                    label, xy=(x, y_end),
+                    textcoords="offset points", xytext=(0, -3),
+                    ha="center", va="top", annotation_clip=False,
+                    fontsize=GRAPH_STYLE["value_annotation_size"],
+                    family="sans-serif", color=COLORS["text"],
+                )
+            else:
+                ax.annotate(
+                    label, xy=(x, y),
+                    textcoords="offset points", xytext=(0, -annot_offset),
+                    ha="center", va="top", annotation_clip=False,
+                    fontsize=GRAPH_STYLE["value_annotation_size"],
+                    family="sans-serif", color=COLORS["text"],
+                )
 
     ax.set_axis_off()
     return pos
@@ -1991,6 +2158,146 @@ def ascending_auction_rounds(valuations):
         if low > 0:
             prices = [p - low for p in prices]
     return rounds
+
+
+# -----------------------------------------------------------------------------
+# Network-exchange bargaining helpers (Lesson 5, c12)
+# -----------------------------------------------------------------------------
+#
+# Chapter 12 models exchange on a graph as an OUTCOME = (matching, node values):
+# matched partners split $1 so their two values sum to 1, and an unmatched node
+# has value 0. Two refinements sit on top of an outcome — STABILITY (no unused
+# edge whose endpoints together make < 1, so no pair can profitably defect) and
+# BALANCE (every matched split is the Nash bargaining outcome given the outside
+# options the rest of the network endogenously provides). These COMPUTE helpers
+# are the single source of truth for those predicates, exactly as the bipartite
+# helpers above are for market clearing: the figures derive their keys/values
+# from the helpers, so a rendered outcome can never drift from the definition.
+#
+# The layers unify. ``nash_bargaining_split`` is the two-person PRIMITIVE
+# (Section 12.5); the graph-global checkers call the outside-option and split
+# routines per matched/unmatched edge (Sections 12.7-12.8), so the same code
+# serves both two-node bargaining and network exchange on an arbitrary graph.
+#
+# Values may be written as exact fractions rendered to floats (1/3, 2/3, ...);
+# the "sum to 1" and split-equality tests use a small tolerance so, e.g.,
+# 1/3 + 2/3 reads as exactly 1 rather than 0.999... .
+
+#: Numerical tolerance for the bargaining predicates' equality/inequality tests.
+_EXCHANGE_EPS = 1e-9
+
+
+def nash_bargaining_split(x, y):
+    """The Nash bargaining split of $1 with outside options x and y (Section 12.5).
+
+    Two people divide one unit of money; A can walk away with an outside option
+    of ``x`` and B with ``y``. When ``x + y > 1`` no division can beat both
+    outside options, so there is NO DEAL and this returns ``None``. Otherwise the
+    pair split the surplus ``s = 1 - x - y`` evenly on top of their outside
+    options, giving the equidependent (Nash) division::
+
+        A gets  x + s/2 = (x + 1 - y) / 2
+        B gets  y + s/2 = (y + 1 - x) / 2
+
+    Returns ``(share_x, share_y)`` — the shares of the party with outside option
+    ``x`` and the party with outside option ``y``, in that order; they always sum
+    to 1 — or ``None`` in the no-deal case. This is the two-player primitive the
+    network-exchange checkers below call once per matched edge.
+    """
+    if x + y > 1 + _EXCHANGE_EPS:
+        return None
+    share_x = (x + 1 - y) / 2
+    share_y = (y + 1 - x) / 2
+    return share_x, share_y
+
+
+def _exchange_partner_map(matching):
+    """Map each matched node to its partner, from an iterable of edge pairs."""
+    partner = {}
+    for u, v in matching:
+        partner[u] = v
+        partner[v] = u
+    return partner
+
+
+def best_outside_option(node, G, matching, values):
+    """A node's best outside option in the current outcome (Section 12.8).
+
+    The outside option is the most a node can make by luring a neighbor away
+    from that neighbor's current partnership: to steal neighbor ``Y`` the node
+    must match Y's current value, keeping ``1 - values[Y]`` for itself. So the
+    best outside option is the maximum of ``1 - values[Y]`` over every neighbor
+    ``Y`` OTHER than the node's own current partner. An unmatched neighbor has
+    value 0 and hence offers an outside option of 1 (you could pair with it and
+    keep almost everything). A node with no eligible neighbor — e.g. a pendant
+    whose only neighbor is its current partner — has an outside option of 0.
+
+    These are the endogenous outside options the network provides; ``is_balanced``
+    feeds them into the Nash split for each matched edge. (Missing entries in
+    ``values`` are treated as 0, i.e. an unmatched node.)
+    """
+    partner = _exchange_partner_map(matching).get(node)
+    opts = [1 - values.get(nbr, 0) for nbr in G.neighbors(node) if nbr != partner]
+    return max(opts, default=0.0)
+
+
+def find_instabilities(G, matching, values):
+    """Every instability in the outcome (Section 12.7).
+
+    An instability is an edge NOT in the matching whose two endpoints' values
+    sum to strictly less than 1: the pair could abandon their current
+    arrangements, exchange with each other, and both end up better off. Returns
+    the list of witnessing edges as ``(u, v)`` tuples in ``G.edges()`` order. The
+    strict ``< 1`` test carries a small tolerance, so an unused edge summing to
+    exactly 1 (e.g. 1/3 + 2/3) is NOT flagged. (Missing entries in ``values`` are
+    treated as 0.) An outcome is stable exactly when this list is empty.
+    """
+    matched = {frozenset(e) for e in matching}
+    witnesses = []
+    for u, v in G.edges():
+        if frozenset((u, v)) in matched:
+            continue
+        if values.get(u, 0) + values.get(v, 0) < 1 - _EXCHANGE_EPS:
+            witnesses.append((u, v))
+    return witnesses
+
+
+def is_stable(G, matching, values):
+    """True iff the outcome contains no instabilities (Section 12.7).
+
+    Thin wrapper over ``find_instabilities`` — an outcome is stable if and only
+    if no unused edge joins two nodes whose values sum to less than 1.
+    """
+    return not find_instabilities(G, matching, values)
+
+
+def is_balanced(G, matching, values):
+    """True iff every matched split is its Nash bargaining outcome (Section 12.8).
+
+    This is the balance CHECKER, not the solver: given a proposed outcome it
+    verifies the balance fixed point rather than computing balanced values. For
+    each edge in the matching it takes both endpoints' endogenous outside options
+    (``best_outside_option``, derived from the rest of the network's current
+    values), computes the Nash bargaining split for those outside options, and
+    checks that the outcome's values match it (within tolerance). Returns False
+    if any matched edge deviates, or if a matched pair's outside options sum to
+    more than 1 (no Nash deal exists for them).
+
+    Balance is a refinement of stability — every balanced outcome is stable —
+    but this routine checks the balance condition directly and does not re-test
+    stability. (Missing entries in ``values`` are treated as 0.)
+    """
+    for u, v in matching:
+        x = best_outside_option(u, G, matching, values)
+        y = best_outside_option(v, G, matching, values)
+        split = nash_bargaining_split(x, y)
+        if split is None:
+            return False
+        share_u, share_v = split
+        if (abs(values.get(u, 0) - share_u) > _EXCHANGE_EPS
+                or abs(values.get(v, 0) - share_v) > _EXCHANGE_EPS):
+            return False
+    return True
 
 
 # --- renderer: bipartite matching market -------------------------------------

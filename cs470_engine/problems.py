@@ -5,6 +5,8 @@ Supports both single-select and multi-select MC via a unified
 MathJax. Layout per design doc §6.1.
 """
 
+from fractions import Fraction
+
 import matplotlib.pyplot as plt
 import networkx as nx
 import ipywidgets as widgets
@@ -468,51 +470,115 @@ def _render_bipartite_market(figure_spec: dict) -> None:
     plt.close(fig)
 
 
-def _render_figure(ws, figure_spec: dict) -> None:
-    """Render a YAML figure spec into the current Output context.
+def _exchange_num(v):
+    """Coerce a YAML value / fraction-string to a float for the bargaining
+    helpers. ``"1/3"`` -> 0.333…, ``Fraction`` / int / float -> float. (The
+    RENDER side keeps the original object so it labels exactly as authored.)"""
+    if isinstance(v, str):
+        return float(Fraction(v))
+    return float(v)
 
-    Supports ``kind: graph`` (inline or via ``ref:``) and ``kind: image`` (a
-    pre-rendered raster via ``path:``). Other kinds print a placeholder note.
+
+def _resolve_graph_annotations(figure_spec: dict, G) -> dict:
+    """Resolve the ``draw_graph`` annotation kwargs for a ``kind: graph`` spec.
+
+    Highlights are forwarded verbatim (the pre-existing dispatch dropped them);
+    the Lesson-5 network-exchange OUTCOME layer is DERIVED from the compute
+    helpers rather than read as YAML literals — the same anti-drift discipline
+    ``bipartite_market`` uses for its matching / constricted set, expressed with
+    the identical ``"auto"`` idiom:
+
+    - ``matching`` — a list of ``[u, v]`` edges (the outcome's matching). The
+      bold **matched-edge** set defaults to exactly this matching, so the drawn
+      bold edges can't disagree with the stated matching. ``matched_edges`` may
+      still be given explicitly (or ``"auto"`` == the matching).
+    - ``outside_options: auto`` — each matched node's endogenous best outside
+      option, computed by ``best_outside_option`` from the rest of the network's
+      values (never hand-typed, so the pendant labels match what balance uses).
+    - ``node_values: auto`` — each matched pair's split, computed by
+      ``nash_bargaining_split`` from that pair's outside options (the §12.5
+      two-person primitive). There is no balance SOLVER — only a checker — so a
+      general balanced outcome's ``node_values`` are supplied explicitly (they
+      are the answer key), while ``outside_options``/``matched_edges`` still
+      derive from them.
+
+    A purely structural graph figure (Lessons 1-4) passes none of these, so the
+    returned kwargs are all empty/off and ``draw_graph`` renders byte-identically
+    to the pre-Lesson-5 dispatch.
     """
-    if "ref" in figure_spec:
-        name = figure_spec["ref"]
-        figure_spec = ws.shared_figures.get(name)
-        if not figure_spec:
-            print(f"[engine] Missing shared figure: {name}")
-            return
+    from .plot_style import best_outside_option, nash_bargaining_split
 
-    kind = figure_spec.get("kind", "graph")
-    if kind == "image":
-        path = figure_spec.get("path")
-        resolved = _resolve_figure_path(ws, path) if path else None
-        if resolved is None:
-            print(f"[engine] Figure image not found: {path!r}")
-            return
-        img = plt.imread(str(resolved))
-        # Size the axes to the image aspect; equal aspect + axis off so the
-        # raster is shown undistorted and unframed (no autoscale surprises).
-        h, w = img.shape[0], img.shape[1]
-        fig, ax = plt.subplots(figsize=(5, 5 * h / w if w else 4))
-        ax.imshow(img)
-        ax.set_aspect("equal")
-        ax.set_axis_off()
-        plt.tight_layout()
-        display(fig)
-        plt.close(fig)
-        return
-    if kind == "payoff_matrix":
-        _render_payoff_matrix(figure_spec)
-        return
-    if kind in _AUCTION_KINDS:
-        _render_auction(figure_spec)
-        return
-    if kind == "bipartite_market":
-        _render_bipartite_market(figure_spec)
-        return
-    if kind != "graph":
-        print(f"[engine] Figure kind {kind!r} not yet implemented.")
-        return
+    def _edges(key):
+        return [tuple(e) for e in (figure_spec.get(key) or [])]
 
+    highlight_nodes = list(figure_spec.get("highlight_nodes") or [])
+    highlight_edges = _edges("highlight_edges")
+    pendant_stub = bool(figure_spec.get("pendant_stub"))
+    matching = _edges("matching")
+
+    # Matched (bold-black) edges: explicit list, "auto" (== the matching), or —
+    # the default — the matching itself when one is given.
+    me = figure_spec.get("matched_edges")
+    if me == "auto" or me is None:
+        matched_edges = list(matching)
+    else:
+        matched_edges = [tuple(e) for e in me]
+
+    nv = figure_spec.get("node_values")
+    oo = figure_spec.get("outside_options")
+
+    # node_values: explicit outcome dict (the answer key — no solver exists),
+    # or derive each matched pair's Nash split from its two outside options.
+    node_values = {}
+    if isinstance(nv, dict):
+        node_values = dict(nv)
+    elif nv == "auto":
+        if not isinstance(oo, dict):
+            raise ValueError(
+                "node_values: auto needs an explicit outside_options map to "
+                "derive the Nash split from")
+        for u, v in matching:
+            split = nash_bargaining_split(_exchange_num(oo[u]), _exchange_num(oo[v]))
+            if split is None:
+                raise ValueError(
+                    f"node_values: auto — no Nash deal for matched edge "
+                    f"({u!r}, {v!r}); outside options sum to more than 1")
+            node_values[u], node_values[v] = split
+
+    # outside_options: explicit dict, or derive each matched node's endogenous
+    # best outside option from the current values via the helper.
+    outside_options = {}
+    if isinstance(oo, dict):
+        outside_options = dict(oo)
+    elif oo == "auto":
+        vals = {n: _exchange_num(x) for n, x in node_values.items()}
+        matched_nodes = [n for e in matching for n in e]
+        outside_options = {
+            n: best_outside_option(n, G, matching, vals) for n in matched_nodes
+        }
+
+    return {
+        "highlight_nodes": highlight_nodes,
+        "highlight_edges": highlight_edges,
+        "matched_edges": matched_edges,
+        "node_values": node_values,
+        "outside_options": outside_options,
+        "pendant_stub": pendant_stub,
+    }
+
+
+def _render_graph(figure_spec: dict) -> None:
+    """Render a ``kind: graph`` figure spec (the default kind).
+
+    Builds the networkx graph + layout, then forwards the FULL ``draw_graph``
+    parameter set: the previously-dropped ``highlight_edges``/``highlight_nodes``
+    AND the Lesson-5 outcome annotation layer (matched edges, node values,
+    outside options, pendant stubs). Derived bargaining values come from the
+    compute helpers (see ``_resolve_graph_annotations``), so a rendered outcome
+    can't drift from the definition it illustrates — matching
+    ``bipartite_market``'s anti-drift discipline. Directed figures keep their
+    existing ``draw_directed_graph`` path unchanged.
+    """
     from .plot_style import draw_graph, draw_directed_graph, apply_ax_style
 
     directed = bool(figure_spec.get("directed"))
@@ -558,8 +624,56 @@ def _render_figure(ws, figure_spec: dict) -> None:
         # + LaTeX label map + curated positions, matching the module-drawn DAG.
         draw_directed_graph(G, ax, pos=pos, labels=label_map or None)
     else:
-        draw_graph(G, ax, pos=pos)
+        draw_graph(G, ax, pos=pos, **_resolve_graph_annotations(figure_spec, G))
     apply_ax_style(ax)
     plt.tight_layout()
     display(fig)
     plt.close(fig)
+
+
+def _render_figure(ws, figure_spec: dict) -> None:
+    """Render a YAML figure spec into the current Output context.
+
+    Supports ``kind: graph`` (inline or via ``ref:``) and ``kind: image`` (a
+    pre-rendered raster via ``path:``). Other kinds print a placeholder note.
+    """
+    if "ref" in figure_spec:
+        name = figure_spec["ref"]
+        figure_spec = ws.shared_figures.get(name)
+        if not figure_spec:
+            print(f"[engine] Missing shared figure: {name}")
+            return
+
+    kind = figure_spec.get("kind", "graph")
+    if kind == "image":
+        path = figure_spec.get("path")
+        resolved = _resolve_figure_path(ws, path) if path else None
+        if resolved is None:
+            print(f"[engine] Figure image not found: {path!r}")
+            return
+        img = plt.imread(str(resolved))
+        # Size the axes to the image aspect; equal aspect + axis off so the
+        # raster is shown undistorted and unframed (no autoscale surprises).
+        h, w = img.shape[0], img.shape[1]
+        fig, ax = plt.subplots(figsize=(5, 5 * h / w if w else 4))
+        ax.imshow(img)
+        ax.set_aspect("equal")
+        ax.set_axis_off()
+        plt.tight_layout()
+        display(fig)
+        plt.close(fig)
+        return
+    if kind == "payoff_matrix":
+        _render_payoff_matrix(figure_spec)
+        return
+    if kind in _AUCTION_KINDS:
+        _render_auction(figure_spec)
+        return
+    if kind == "bipartite_market":
+        _render_bipartite_market(figure_spec)
+        return
+    if kind != "graph":
+        print(f"[engine] Figure kind {kind!r} not yet implemented.")
+        return
+
+    _render_graph(figure_spec)
