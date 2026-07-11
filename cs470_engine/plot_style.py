@@ -34,6 +34,7 @@ import re
 from fractions import Fraction
 
 import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
 from matplotlib import rcParams
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path as MplPath
@@ -144,13 +145,52 @@ GRAPH_STYLE = {
     # circle regardless of node_size.
     "value_annotation_size":   12,
     "value_annotation_gap":    6,     # points of clearance beyond the node radius
+    # Free-direction placement. A label is offset straight up (value) or straight
+    # down (outside option) UNLESS that direction runs too close to one of the
+    # node's own incident edges — on a diagonal layout an edge can leave a node at
+    # nearly 90 deg and drive straight through the label. When the vertical is
+    # within `annotation_free_angle` of an incident edge, the label rotates to the
+    # smallest tilt that clears every incident edge by that angle. The tilt is
+    # capped by `annotation_max_tilt` (< 90 deg) so the label always stays on its
+    # own side of the node and the above/below convention survives.
+    "annotation_free_angle":   38,    # degrees of angular clearance to aim for
+    "annotation_max_tilt":     60,    # max rotation away from vertical
+    # Rotating into the free wedge is only half the job: the wedge has to be WIDE
+    # enough to hold the label. A wedge widens linearly with distance from the
+    # node, so a tilted label is pushed out to where its own box fits with
+    # `annotation_edge_margin` points to spare. The label's size is ESTIMATED from
+    # its font size and character count (points — no renderer, no bbox pass); the
+    # render gate measures the true bbox and is what actually proves the clearance.
+    # An untilted label never needs the push (its wedge is wide open), so every
+    # clean figure keeps byte-identical placement.
+    "annotation_edge_margin":  9,     # points of clearance to keep off an incident edge
+    "annotation_char_width":   0.60,  # label width ~ chars * fontsize * this
+    "annotation_line_height":  1.20,  # label height ~ fontsize * this
+    "annotation_max_offset":   2.5,   # cap the radial push (multiple of the base offset)
     # Outside-option pendant stub: a short dashed half-edge dangling from a node
     # toward its outside-option label (cf. Figures 12.6/12.8/12.9). Its length is
-    # a fraction of the median graph edge length, so it scales with the layout.
+    # FIXED, in typographic points — the same unit basis as the annotation offset.
+    # It is emphatically NOT a fraction of edge length: edge length is measured in
+    # DATA units, and on a wide/flat layout matplotlib autoscales y to a tiny range,
+    # so the data->display scale on y explodes and a data-unit stub renders ~30x
+    # longer than on a compact layout (measured: 104 px vs 3068 px for near-identical
+    # data-space edge lengths). Points are display units, so the stub is identical
+    # on every layout.
     "pendant_stub_style":      "dashed",
     "pendant_stub_color":      COLORS["primary"],
     "pendant_stub_width":      1.5,
-    "pendant_stub_frac":       0.38,
+    "pendant_stub_len_pts":    20,    # stub length, POINTS (not data units)
+    "pendant_label_gap":       3,     # points from the stub end to the label
+    # Row caption: the above/below convention is otherwise conveyed by position
+    # alone, so a bare "0.60" under a node is undecodable from the figure. The
+    # caption names each row that is ACTUALLY populated — and only those, since a
+    # row can vanish mid-interaction (5.1's no-deal region drops the value row).
+    "row_caption_size":        10,
+    "row_caption_color":       COLORS["primary"],
+    "row_caption_gap":         10,    # points below the lowest below-label
+    "value_row_caption":       "above: value",
+    "outside_row_caption":     "below: outside option",
+    "row_caption_sep":         "     ·     ",
 }
 
 
@@ -569,6 +609,166 @@ def _exchange_value_label(v):
     return f"{frac.numerator}/{frac.denominator}"
 
 
+# -----------------------------------------------------------------------------
+# Free-direction annotation placement
+# -----------------------------------------------------------------------------
+#
+# The value / outside-option rows are offset from a node by a fixed distance in
+# points. Offsetting them straight up / straight down is right on a path layout,
+# but on a diagonal layout an incident edge can leave the node at close to 90
+# degrees and run straight through the label (5.1's stem: the C-D edge leaves C
+# at -73 deg, and C's outside-option label sits at -90 deg — 17 deg apart, so the
+# edge cuts the text).
+#
+# The fix is LOCAL and angle-driven: look only at the directions of the node's own
+# incident edges and rotate the label into the free gap. No bbox measurement, so
+# it needs no renderer and is scale-independent — which matches the measured
+# failure (identical collision set at three figure sizes: it is driven by edge
+# ANGLE, not by figure scale).
+
+def _incident_angles(G, pos, node):
+    """Directions (radians) of every edge leaving ``node``, in data space."""
+    if node not in pos:
+        return []
+    x, y = pos[node]
+    angles = []
+    for nb in G.neighbors(node):
+        if nb == node or nb not in pos:
+            continue
+        dx, dy = pos[nb][0] - x, pos[nb][1] - y
+        if dx or dy:
+            angles.append(math.atan2(dy, dx))
+    return angles
+
+
+def _edge_clearance(theta, edge_angles):
+    """Smallest angle (radians) between direction ``theta`` and any incident edge."""
+    if not edge_angles:
+        return math.pi
+    return min(abs(math.remainder(theta - a, 2 * math.pi)) for a in edge_angles)
+
+
+def _crosses_edge(base, tilt, edge_angles):
+    """True if rotating from ``base`` by ``tilt`` sweeps PAST an incident edge."""
+    for a in edge_angles:
+        d = math.remainder(a - base, 2 * math.pi)   # edge's offset from base, (-pi, pi]
+        if (tilt > 0 and 0 < d <= tilt) or (tilt < 0 and tilt <= d < 0):
+            return True
+    return False
+
+
+def _free_direction(edge_angles, base, *, safe, max_tilt, step=math.radians(1)):
+    """A direction for an annotation: ``base``, or the smallest rotation off it
+    that clears every incident edge.
+
+    Returns ``base`` unchanged whenever ``base`` already clears every incident
+    edge by ``safe`` — which is every node of every path/horizontal layout, so
+    those figures render exactly as they did before. Otherwise it rotates to the
+    SMALLEST tilt reaching ``safe`` clearance, within two hard constraints:
+
+    * ``max_tilt`` (< 90 deg) keeps the label on its own side of the node, so a
+      value stays above and an outside option stays below. Without it, "maximize
+      the angular gap" would park a leaf node's label straight out sideways —
+      a regression on figures that are fine today, and a break of the above/below
+      convention the rows are read by.
+    * the label may never rotate PAST an incident edge. It stays in the angular
+      gap it started in — the wedge between the two edges that bracket ``base``.
+      This matters: on 5.1's stem, node C's two edges leave at -146 and -73 deg,
+      so the wedge below C is only 73 deg wide and cannot offer more than 36 deg
+      of clearance. Allowed to cross, the search would hop the C-D edge and park
+      C's label out at -35 deg — clear of the edges, but hanging off C's lower
+      RIGHT, reading as if it belonged to the C-D edge rather than to C. Pinned
+      to the wedge, it settles on the bisector instead: the best placement the
+      geometry actually admits, and still recognizably below C.
+
+    So when the wedge is too narrow to reach ``safe``, this returns the freest
+    direction inside it (the bisector) rather than a wider-clearance direction
+    outside it. ``safe`` is a target, not a guarantee; the render gate is what
+    proves the resulting pixel clearance.
+    """
+    best_gap = _edge_clearance(base, edge_angles)
+    if best_gap >= safe:
+        return base
+    best = base
+    for i in range(1, int(max_tilt / step) + 1):
+        cands = []
+        for sign in (-1, 1):
+            tilt = sign * i * step
+            if _crosses_edge(base, tilt, edge_angles):
+                continue
+            cands.append((_edge_clearance(base + tilt, edge_angles), base + tilt))
+        if not cands:
+            break
+        cands.sort(key=lambda t: -t[0])
+        if cands[0][0] >= safe:
+            return cands[0][1]
+        if cands[0][0] > best_gap:
+            best_gap, best = cands[0]
+    return best
+
+
+def _fitted_distance(text, theta, edge_angles, base_dist):
+    """How far out (points) a label must sit to clear every incident edge.
+
+    The label is an axis-aligned box of estimated half-width ``hw`` and half-height
+    ``hh``. For an edge leaving the node at angle ``a``, the box's extent TOWARD
+    that edge is its support along the edge's normal, ``hw*|sin a| + hh*|cos a|``,
+    while the label's centre stands ``dist * sin(theta - a)`` away from the edge
+    line. Requiring the difference to be at least ``annotation_edge_margin`` and
+    solving for ``dist`` gives the distance below; the largest over all incident
+    edges wins.
+
+    A label pointing straight down from a node on a horizontal path has
+    ``sin(theta - a) = 1`` and a support of just ``hh``, so the requirement is far
+    below the base offset and ``base_dist`` is returned untouched — which is why
+    every clean figure stays byte-identical. It only bites in a narrow wedge,
+    where ``sin(theta - a)`` is small and the label has to move out to fit.
+    """
+    fs = GRAPH_STYLE["value_annotation_size"]
+    hw = 0.5 * max(len(str(text)), 1) * fs * GRAPH_STYLE["annotation_char_width"]
+    hh = 0.5 * fs * GRAPH_STYLE["annotation_line_height"]
+    margin = GRAPH_STYLE["annotation_edge_margin"]
+    need = base_dist
+    for a in edge_angles:
+        delta = abs(math.remainder(theta - a, 2 * math.pi))
+        # An edge is a RAY leaving the node, not an infinite line. If the label
+        # points more than 90 deg away from it, the label is behind the edge's
+        # origin and moving further out only increases the gap — the nearest point
+        # of the ray is the node itself, which the base offset already clears. Such
+        # an edge must not drive the distance: treating it as a line would make
+        # sin(delta) collapse toward zero for a near-anti-parallel edge and demand
+        # an enormous push (5.1's stem: D's edge to C leaves UPWARD at 107 deg while
+        # D's outside-option label points DOWN, and D's label would be flung out to
+        # the cap to "clear" an edge it is walking away from).
+        if delta > math.pi / 2:
+            continue
+        sep = math.sin(delta)
+        if sep < 1e-6:          # label points straight along the edge: pushing out
+            continue            # cannot help; the tilt search is what avoids this
+        support = hw * abs(math.sin(a)) + hh * abs(math.cos(a))
+        need = max(need, (support + margin) / sep)
+    return min(need, base_dist * GRAPH_STYLE["annotation_max_offset"])
+
+
+def _annotate_offset(ax, ax_xy, text, theta, dist, gid, **kw):
+    """Place ``text`` at ``dist`` POINTS from ``ax_xy`` along direction ``theta``.
+
+    Stays horizontally centred on the offset point and sits above it (value) or
+    below it (outside option) — the same anchoring an untilted label has always
+    used, so a label that does not tilt lands exactly where it used to.
+    """
+    art = ax.annotate(
+        text, xy=ax_xy, textcoords="offset points",
+        xytext=(dist * math.cos(theta), dist * math.sin(theta)),
+        ha="center", va=("bottom" if math.sin(theta) >= 0 else "top"),
+        annotation_clip=False,
+        fontsize=GRAPH_STYLE["value_annotation_size"],
+        family="sans-serif", color=COLORS["text"], **kw,
+    )
+    art.set_gid(gid)
+    return art
+
+
 def draw_graph(
     G,
     ax,
@@ -800,58 +1000,95 @@ def draw_graph(
     # typographic points added to the node radius so text clears the circle at
     # any node_size; annotation_clip=False keeps them visible past the (invisible)
     # axes frame under the project's tight bbox at save/inline time.
-    if node_values or outside_options:
+    # Only rows that actually land on a drawn node count as populated. This is
+    # what the row caption is conditioned on, so it must reflect what is really
+    # rendered — not merely what was passed in.
+    value_row = {n: v for n, v in (node_values or {}).items() if n in pos}
+    outside_row = {n: v for n, v in (outside_options or {}).items() if n in pos}
+
+    if value_row or outside_row:
         radius_pts = math.sqrt(node_size / math.pi)
         annot_offset = radius_pts + GRAPH_STYLE["value_annotation_gap"]
+        safe = math.radians(GRAPH_STYLE["annotation_free_angle"])
+        max_tilt = math.radians(GRAPH_STYLE["annotation_max_tilt"])
+        up, down = math.pi / 2, -math.pi / 2
 
-    if node_values:
-        for node, val in node_values.items():
-            if node not in pos:
-                continue
-            x, y = pos[node]
-            ax.annotate(
-                _exchange_value_label(val), xy=(x, y),
-                textcoords="offset points", xytext=(0, annot_offset),
-                ha="center", va="bottom", annotation_clip=False,
-                fontsize=GRAPH_STYLE["value_annotation_size"],
-                family="sans-serif", color=COLORS["text"],
-            )
+    below_reach = []   # how far below its node each outside label hangs, in points
 
-    if outside_options:
-        stub_len = None
+    for node, val in value_row.items():
+        edges = _incident_angles(G, pos, node)
+        theta = _free_direction(edges, up, safe=safe, max_tilt=max_tilt)
+        label = _exchange_value_label(val)
+        _annotate_offset(ax, pos[node], label, theta,
+                         _fitted_distance(label, theta, edges, annot_offset),
+                         "cs470:value")
+
+    for node, val in outside_row.items():
+        edges = _incident_angles(G, pos, node)
+        theta = _free_direction(edges, down, safe=safe, max_tilt=max_tilt)
+        label = _exchange_value_label(val)
+        dist = _fitted_distance(label, theta, edges, annot_offset)
         if pendant_stub:
-            lens = sorted(math.dist(pos[u], pos[v]) for u, v in G.edges())
-            median_len = lens[len(lens) // 2] if lens else 1.0
-            stub_len = GRAPH_STYLE["pendant_stub_frac"] * median_len
-        for node, val in outside_options.items():
-            if node not in pos:
-                continue
-            x, y = pos[node]
-            label = _exchange_value_label(val)
-            if pendant_stub:
-                y_end = y - stub_len
-                ax.plot(
-                    [x, x], [y, y_end],
+            # A stub of FIXED length in points — drawn as an annotate offset so it
+            # lives in display space. (The old rule took a fraction of the median
+            # edge length, a DATA-unit quantity, and applied it along y; on a flat
+            # layout the y data->display scale explodes and the stub ran ~30x long.)
+            # zorder 0 tucks it under the node marker, so the stub reads as leaving
+            # the circle rather than starting at its center.
+            stub = GRAPH_STYLE["pendant_stub_len_pts"]
+            ax.annotate(
+                "", xy=pos[node], xycoords="data",
+                textcoords="offset points",
+                xytext=(stub * math.cos(theta), stub * math.sin(theta)),
+                arrowprops=dict(
+                    arrowstyle="-", shrinkA=0, shrinkB=0,
                     linestyle=GRAPH_STYLE["pendant_stub_style"],
                     color=GRAPH_STYLE["pendant_stub_color"],
                     linewidth=GRAPH_STYLE["pendant_stub_width"],
-                    zorder=0,
-                )
-                ax.annotate(
-                    label, xy=(x, y_end),
-                    textcoords="offset points", xytext=(0, -3),
-                    ha="center", va="top", annotation_clip=False,
-                    fontsize=GRAPH_STYLE["value_annotation_size"],
-                    family="sans-serif", color=COLORS["text"],
-                )
-            else:
-                ax.annotate(
-                    label, xy=(x, y),
-                    textcoords="offset points", xytext=(0, -annot_offset),
-                    ha="center", va="top", annotation_clip=False,
-                    fontsize=GRAPH_STYLE["value_annotation_size"],
-                    family="sans-serif", color=COLORS["text"],
-                )
+                ),
+                annotation_clip=False, zorder=0,
+            )
+            # The STUB is fixed-length; the LABEL still has to clear the wedge. On
+            # the pendant's intended consumers (wide horizontal paths) nothing is
+            # tilted, so the label lands right off the stub end as designed; in a
+            # tight wedge it slides further out rather than being pulled back into
+            # an incident edge.
+            dist = _fitted_distance(label, theta, edges,
+                                    stub + GRAPH_STYLE["pendant_label_gap"])
+        below_reach.append(dist)
+        _annotate_offset(ax, pos[node], label, theta, dist, "cs470:outside")
+
+    # Row caption — CONDITIONAL. Names only the rows that are populated, so a
+    # figure carrying just outside options announces "outside option" and nothing
+    # else, and a row that disappears mid-interaction takes its caption with it
+    # (5.1's no-deal region drops the value row live, and a static heading would
+    # be left stranded over an empty row).
+    #
+    # Anchored to the CONTENT, not to an axes fraction: y at the lowest node in
+    # DATA coords, then dropped a fixed number of POINTS below the deepest label
+    # that hangs off it. An axes-fraction anchor is not usable here — the axes box
+    # bears no fixed relation to the drawn graph (equal aspect leaves slack, and a
+    # 2-node layout is degenerate in y), so "6% below the axes" lands inside the
+    # figure on the stem and far adrift on the 2-node one. x rides the axes centre.
+    caption = GRAPH_STYLE["row_caption_sep"].join(
+        part for part, present in (
+            (GRAPH_STYLE["value_row_caption"], value_row),
+            (GRAPH_STYLE["outside_row_caption"], outside_row),
+        ) if present
+    )
+    if caption:
+        drop = (max(below_reach, default=annot_offset)
+                + GRAPH_STYLE["value_annotation_size"] * GRAPH_STYLE["annotation_line_height"]
+                + GRAPH_STYLE["row_caption_gap"])
+        anchor = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
+        cap = ax.annotate(
+            caption, xy=(0.5, min(y for _, y in pos.values())), xycoords=anchor,
+            textcoords="offset points", xytext=(0, -drop),
+            ha="center", va="top", annotation_clip=False,
+            fontsize=GRAPH_STYLE["row_caption_size"],
+            family="sans-serif", color=GRAPH_STYLE["row_caption_color"],
+        )
+        cap.set_gid("cs470:rowcap")
 
     ax.set_axis_off()
     return pos

@@ -7,6 +7,7 @@ import time
 
 import ipywidgets as widgets
 
+from .messages import render_option_markdown
 from .plot_style import COLORS
 
 
@@ -141,7 +142,10 @@ class OptionPicker:
         self._option_ids: list[str] = []
         self._checkboxes: dict = {}
         self._labels: dict = {}
-        self._original_labels: dict = {}
+        # Rendered option HTML (markdown applied, math preserved). Held so
+        # show_correct() can rebuild a row with its ✓/✗ marker without paying
+        # for — or re-deriving — a second markdown pass.
+        self._option_html: dict = {}
         self._observers: list = []
         self._silencing = False
         rows = []
@@ -166,15 +170,16 @@ class OptionPicker:
                 indent=False,
                 layout=widgets.Layout(width="24px", margin="0"),
             )
+            option_html = render_option_markdown(label)
             html = widgets.HTMLMath(
-                value=_option_label_wrap(label),
+                value=_option_label_wrap(option_html),
                 layout=widgets.Layout(width="auto", margin="0 0 0 0.4em"),
             )
             cb.observe(self._on_change, names="value")
             self._option_ids.append(oid)
             self._checkboxes[oid] = cb
             self._labels[oid] = html
-            self._original_labels[oid] = label
+            self._option_html[oid] = option_html
             rows.append(widgets.HBox(
                 [cb, html],
                 layout=widgets.Layout(align_items="center", margin="0.15em 0"),
@@ -238,7 +243,7 @@ class OptionPicker:
         good = COLORS["good"]
         bad = COLORS["bad"]
         for oid in self._option_ids:
-            original = self._original_labels[oid]
+            original = self._option_html[oid]
             picked = self._checkboxes[oid].value
             if oid in correct_set:
                 marker = (

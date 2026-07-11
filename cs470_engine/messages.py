@@ -5,9 +5,15 @@ render functions), the durable-session feature's student-facing strings live
 here so wording stays consistent across the notebook intro, the finalize
 confirmation, the empty-session guard, and the restored-answer banner.
 
-Also home to ``mathjax_safe_currency`` — the single shared helper that protects
-authored literal-currency ``\\$`` on the IPython.display.Markdown render path.
+Also home to the two math/markdown render helpers:
+``mathjax_safe_currency`` (the Markdown() prose path) and
+``render_option_markdown`` (the HTMLMath option path). They are NOT
+interchangeable — see each docstring for its scope.
 """
+
+import re
+
+import markdown as _markdown
 
 
 def mathjax_safe_currency(md_text: str) -> str:
@@ -31,6 +37,74 @@ def mathjax_safe_currency(md_text: str) -> str:
     if not isinstance(md_text, str):
         return md_text
     return md_text.replace(r"\$", r"\\$")
+
+
+# Math spans are lifted out of an option before the markdown pass and restored
+# verbatim after it. Alternation order is load-bearing: a literal-currency ``\$``
+# is consumed FIRST, so it can never be mistaken for a math delimiter and open a
+# span that swallows the rest of the string.
+_MATH_SPAN = re.compile(
+    r"\\\$"                     # literal-currency \$
+    r"|\$\$.+?\$\$"             # display math
+    r"|\$(?:\\.|[^$\\])+?\$",   # inline math
+    re.DOTALL,
+)
+
+# python-markdown is a *document* renderer: it wraps output in <p>…</p>. An
+# option is inline content living inside an HBox row, where a block element
+# would contribute paragraph margins. Strip the wrapper when (as for every
+# option in the corpus) the whole render is a single paragraph; if it somehow
+# isn't, leave the output alone rather than mangling it.
+_ONE_PARAGRAPH = re.compile(r"\A<p>(.*)</p>\Z", re.DOTALL)
+
+_MASK_TOKEN = "@@CS470MATH{}@@"
+_MASK_RE = re.compile(r"@@CS470MATH(\d+)@@")
+
+
+def render_option_markdown(text: str) -> str:
+    r"""Render markdown in an MC option, leaving its math untouched.
+
+    Options render through ``ipywidgets.HTMLMath`` (HTML + MathJax in the
+    browser), which does no markdown — so authored ``*emph*`` / ``**bold**``
+    reaches the student as literal asterisks. Adding a naive markdown pass fixes
+    that but corrupts math: python-markdown's escapable set is the Markdown.pl
+    set, which includes ``{`` and ``}``, and the pass has no concept of math
+    mode. So ``$\{A, B\}$`` loses its backslashes, MathJax reads the bare braces
+    as TeX *grouping* (which prints nothing), and the set braces silently vanish
+    from the answer.
+
+    The fix is to mask ``$…$`` (and ``\$``) out of the string, run markdown over
+    the prose that remains, then restore the math verbatim. Markdown never sees
+    the math, so ``\{``, ``\$``, ``\tfrac`` and every other TeX escape are
+    immune *structurally* — not merely observed-safe on today's corpus, which
+    matters because a future option written as ``$\{x\}$`` would otherwise
+    reopen the wound silently. This mirrors what JupyterLab's own markdown
+    renderer does for prose cells (``removeMath`` → markdown → ``replaceMath``);
+    ``HTMLMath`` simply has no equivalent, so the engine supplies it.
+
+    SCOPED to the option path. Do NOT chain ``mathjax_safe_currency`` onto this:
+    that helper doubles a backslash to survive markdown-it's CommonMark
+    de-escaping on the ``Markdown()`` prose path, whereas python-markdown leaves
+    ``\$`` alone — and here the masking makes the point moot anyway. Applying
+    both would double-escape and print a stray backslash.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+
+    math = []
+
+    def _stash(m):
+        math.append(m.group(0))
+        return _MASK_TOKEN.format(len(math) - 1)
+
+    html = _markdown.markdown(_MATH_SPAN.sub(_stash, text))
+
+    unwrapped = _ONE_PARAGRAPH.match(html)
+    if unwrapped:
+        html = unwrapped.group(1)
+
+    return _MASK_RE.sub(lambda m: math[int(m.group(1))], html)
+
 
 # Shown in the session-start framing (Worksheet.start) and reinforced in the
 # worksheet intro: how answers get recorded, and what to do after a reopen.
