@@ -33,10 +33,11 @@ import math
 import re
 from fractions import Fraction
 
+import matplotlib.lines as mlines
 import matplotlib.pyplot as plt
 import matplotlib.transforms as mtransforms
 from matplotlib import rcParams
-from matplotlib.patches import PathPatch
+from matplotlib.patches import PathPatch, Rectangle
 from matplotlib.path import Path as MplPath
 import networkx as nx
 
@@ -167,6 +168,22 @@ GRAPH_STYLE = {
     "annotation_char_width":   0.60,  # label width ~ chars * fontsize * this
     "annotation_line_height":  1.20,  # label height ~ fontsize * this
     "annotation_max_offset":   2.5,   # cap the radial push (multiple of the base offset)
+    # COLLISION FALLBACK (0.8.0). The rules above are LOCAL — they consider only
+    # a node's own incident edges. That was sufficient through Lesson 5, whose
+    # graphs are sparse. Lesson 6's are not: on Fig 14.6 the long D->A / E->A
+    # links run right past B and C, so a label can land on an edge that does not
+    # touch its own node, or on a neighbour's label. When (and ONLY when) the
+    # local placement actually collides, the search widens to these bounds and
+    # takes the first clean spot. A figure with no collision never enters it and
+    # is left bit-for-bit alone.
+    # Capped just under 90 so a relocated label NEVER crosses the horizon: an
+    # "above" value stays in the upper half-plane and a "below" one stays in the
+    # lower, however far it has to swing sideways. Crossing would silently make
+    # the row caption lie — the caption says "above: PageRank", and a label that
+    # dodged a collision by dropping underneath its node would be read as the
+    # other row. Clearing the collision must not cost the figure its decodability.
+    "annotation_collision_max_tilt":   88,    # degrees; sideways, never across
+    "annotation_collision_distances":  (1.0, 1.3, 1.7, 2.2),  # multiples of the base offset
     # Outside-option pendant stub: a short dashed half-edge dangling from a node
     # toward its outside-option label (cf. Figures 12.6/12.8/12.9). Its length is
     # FIXED, in typographic points — the same unit basis as the annotation offset.
@@ -191,7 +208,52 @@ GRAPH_STYLE = {
     "value_row_caption":       "above: value",
     "outside_row_caption":     "below: outside option",
     "row_caption_sep":         "     ·     ",
+
+    # Categorical node groups (Lesson 6: bow-tie roles, SCC membership). A single
+    # accent highlight can mark ONE set; a partition needs one color per class,
+    # and the bow-tie has five. Nodes take a translucent group fill with a solid
+    # border of the same hue — the label stays black and legible on top.
+    "group_fill_alpha":        0.55,
+    "group_node_edge_width":   2,
+    "group_legend_size":       9,
+    "group_legend_marker_size": 8,
+    "group_legend_anchor":     (0.5, -0.02),   # just under the axes, centred
+    "group_legend_max_cols":   3,
+
+    # Score labels. The Basic rule's values ARE small exact fractions (1/2, 5/16,
+    # 4/13) and must print as such — they are the chapter's own numbers. The
+    # SCALED rule's exact values at s = 0.85 are not: they are 168/547, 61/949,
+    # 41/708. Same numbers, but nobody can read them, and a student cannot check
+    # them. Past this denominator a row switches wholesale to decimals.
+    "score_fraction_max_denominator": 64,   # > every denominator E&K prints
+    "score_decimal_places":    3,
+
+    # Reciprocal-edge arcs. A 2-cycle drawn straight superimposes two arrowheads
+    # on ONE segment and reads as a single edge; bowing the halves apart in
+    # opposite directions is what makes F⇄G and A⇄B legible as MUTUAL links.
+    # 0.0 (dead straight) for every non-reciprocal edge, so nothing else moves.
+    "reciprocal_edge_rad":     0.18,
 }
+
+#: Bow-tie role -> color. Semantic, not arbitrary: the SCC core takes the accent
+#: (it is the subject), IN and OUT take cool/warm flanking hues, and DISCONNECTED
+#: takes the grey that reads as "not part of the story".
+BOWTIE_COLORS = {
+    "IN":           COLORS["tertiary"],     # sky blue  — upstream of the core
+    "SCC":          COLORS["accent"],       # orange    — the core itself
+    "OUT":          COLORS["good"],         # green     — downstream of the core
+    "TENDRIL":      COLORS["quaternary"],   # caramel   — hanging off a lobe
+    "TUBE":         COLORS["highlight"],    # Arches    — IN -> OUT, bypassing
+    "DISCONNECTED": COLORS["minor_tick"],   # grey      — off the bow-tie
+}
+
+#: Fallback palette for non-bow-tie groupings (e.g. "which SCC is this node in?"),
+#: taken in order. All COLORS tokens — no literals.
+GROUP_COLOR_CYCLE = [
+    COLORS["accent"], COLORS["tertiary"], COLORS["good"],
+    COLORS["quaternary"], COLORS["highlight"], COLORS["bad"],
+    COLORS["primary"],
+]
 
 
 # -----------------------------------------------------------------------------
@@ -549,41 +611,190 @@ DAG_NODE_SIZE = 2000
 DAG_LABEL_FONTSIZE = 8.5
 
 
-def draw_directed_graph(G, ax, *, pos, labels=None, node_size=None,
-                        highlight_edges=None, highlight_color=None):
-    """Draw a directed graph as a causal DAG: arrowheads, labels inside nodes.
+def _draw_grouped_nodes(G, pos, ax, nodelist, node_size, node_groups,
+                        group_colors, group_legend):
+    """Draw ``nodelist``: plain open circles, or colored by categorical group.
 
-    Open-circle nodes (sized for their labels), navy directed edges with
-    arrowheads, optional LaTeX ``labels`` map (id -> text), optional
-    ``highlight_edges`` drawn in the accent/given color. Frames the axes from the
-    node positions with margin (no autoscale-to-patches) and sets equal aspect.
+    With no ``node_groups`` this is EXACTLY the legacy open-circle node pass, so
+    every pre-0.8.0 figure is untouched. With groups, each node takes its group's
+    color as a translucent fill plus a solid border of the same hue, and a legend
+    is emitted so the colors decode themselves.
+
+    Categorical grouping is what a single ``highlight_nodes`` accent cannot do:
+    the bow-tie has FIVE classes (IN / SCC / OUT / tendril / disconnected) and
+    SCC identification wants one color per component. Highlight marks *a* set;
+    groups partition *every* node.
+    """
+    if not node_groups:
+        nx.draw_networkx_nodes(
+            G, pos, ax=ax, nodelist=nodelist,
+            node_color=GRAPH_STYLE["node_fill"],
+            edgecolors=GRAPH_STYLE["node_edge_color"],
+            linewidths=GRAPH_STYLE["node_edge_width"],
+            node_size=node_size,
+        )
+        return
+
+    # Color groups in the order the GROUP MAP lists them, not the order the nodes
+    # happen to appear in. The two differ, and the difference is visible: on Fig
+    # 13.5 the node order starts with a lone singleton, so a node-order palette
+    # hands the loudest color to a node nobody is looking at while the giant SCC
+    # — the entire subject of the figure — takes whatever is left. The helpers
+    # emit their group maps deliberately (biggest component first), and honoring
+    # that is what puts the accent on the thing being taught.
+    ordered = list(dict.fromkeys(node_groups.values()))
+    palette = _resolve_group_colors(ordered, group_colors)
+
+    ungrouped = [n for n in nodelist if n not in node_groups]
+    if ungrouped:
+        nx.draw_networkx_nodes(
+            G, pos, ax=ax, nodelist=ungrouped,
+            node_color=GRAPH_STYLE["node_fill"],
+            edgecolors=GRAPH_STYLE["node_edge_color"],
+            linewidths=GRAPH_STYLE["node_edge_width"],
+            node_size=node_size,
+        )
+    for grp, color in palette.items():
+        members = [n for n in nodelist if node_groups.get(n) == grp]
+        if not members:
+            continue
+        nx.draw_networkx_nodes(
+            G, pos, ax=ax, nodelist=members,
+            node_color=color, alpha=GRAPH_STYLE["group_fill_alpha"],
+            edgecolors=color, linewidths=GRAPH_STYLE["group_node_edge_width"],
+            node_size=node_size,
+        )
+    if group_legend:
+        _draw_group_legend(ax, palette)
+
+
+def _reciprocal_rad(G, u, v):
+    """Arc curvature for edge (u, v) — nonzero only for a RECIPROCAL pair.
+
+    A 2-cycle drawn as two straight edges puts both arrows on the SAME line
+    segment, one on top of the other: the reader sees one line and cannot tell
+    a mutual pair from a single link. Since F⇄G (Fig 14.8) and A⇄B (the 3-node
+    oscillation) are precisely the two figures that carry the leak and the
+    non-convergence insights, that ambiguity would land on the two most important
+    pictures in the lesson.
+
+    Bowing the two halves apart in opposite directions separates them. The sign
+    is keyed to a stable comparison of the endpoints, so each half of a pair bows
+    the opposite way and the rendering does not depend on edge iteration order.
+    Non-reciprocal edges get 0.0 and stay dead straight — which is every edge of
+    every figure drawn before 0.8.0.
+    """
+    if not G.has_edge(v, u) or u == v:
+        return 0.0
+    rad = GRAPH_STYLE["reciprocal_edge_rad"]
+    return rad if str(u) < str(v) else -rad
+
+
+def draw_directed_graph(G, ax, *, pos, labels=None, node_size=None,
+                        show_labels=True,
+                        highlight_nodes=None, highlight_edges=None,
+                        highlight_color=None,
+                        node_values=None, node_values_below=None,
+                        value_caption=None, below_caption=None,
+                        node_groups=None, group_colors=None, group_legend=True,
+                        curved_reciprocal=True, value_format="auto"):
+    """Draw a directed graph: arrowheads, labels inside nodes, full annotation layer.
+
+    AT PARITY WITH ``draw_graph``. Through 0.7.0 this renderer had none of the
+    annotation layer ``draw_graph`` grew across Lessons 4-5 — no node values, no
+    node highlighting, no categorical grouping — and the YAML dispatch forwarded
+    it only ``pos`` and ``labels``. Lesson 6 is the first directed-graph lesson,
+    so it is the first to hit that wall, but it will not be the last: the fix is
+    parity, sharing ``draw_graph``'s machinery, rather than an L6 special case.
+
+    Parameters beyond the original ``pos`` / ``labels`` / ``node_size`` /
+    ``highlight_edges`` / ``highlight_color``:
+
+    show_labels : bool
+        Draw the node labels. Default True (the legacy behavior).
+    highlight_nodes : list, optional
+        Nodes to mark in accent orange (thicker border, slightly larger). The
+        renderer accepted ``highlight_edges`` but never ``highlight_nodes``, and
+        the dispatch forwarded NEITHER — so a directed figure could not mark a
+        node at all.
+    node_values : dict, optional
+        ``{node: value}`` annotated ABOVE each node — the hub / authority /
+        PageRank score written on the node. This is the single most important
+        figure class in Lesson 6 and was simply unrenderable before.
+    node_values_below : dict, optional
+        A SECOND row, annotated below. Hub and authority are two scores on the
+        same node, so a HITS figure wants both at once; PageRank wants one.
+    value_caption, below_caption : str, optional
+        What each row MEANS ("above: authority", "below: hub"). A bare number
+        under a node is undecodable, so the caption is not decoration — it is
+        what makes the figure self-contained. Rows with no caption are drawn
+        uncaptioned rather than mislabeled.
+    node_groups : dict, optional
+        ``{node: group}`` — categorical coloring (bow-tie roles, SCC membership).
+        Emits a decoding legend unless ``group_legend=False``.
+    value_format : "auto" | "fraction" | "decimal"
+        How the two score rows print. ``"auto"`` (the default) keeps exact
+        fractions while they stay legible and switches a row to decimals once a
+        denominator gets ugly — so the Basic rule shows the chapter's 1/2 and
+        5/16, while the scaled rule shows 0.307 rather than 168/547.
+    curved_reciprocal : bool
+        Bow a reciprocal edge pair (u→v and v→u) into two visible arcs instead of
+        two arrows superimposed on one segment. Default True; it is a no-op on a
+        graph with no 2-cycle, which is every directed figure drawn before 0.8.0.
+
+    Values are formatted by ``_exchange_value_label`` — plain text, so a Fraction
+    renders as "4/13" and never as ``$\\frac{4}{13}$``. Figure labels must not go
+    through mathtext (the Lesson-4 double-wrap crash class), and Lesson 6's labels
+    are almost entirely fractions.
     """
     node_size = node_size or DAG_NODE_SIZE
     highlight = {tuple(e) for e in (highlight_edges or [])}
+    highlight_nodes = list(highlight_nodes or [])
     hl_color = highlight_color or COLORS["accent"]
 
     frame_signed_axes(ax, pos, node_size=node_size, rad=0.0)
 
     for u, v in G.edges():
         is_hl = (u, v) in highlight
+        rad = _reciprocal_rad(G, u, v) if curved_reciprocal else 0.0
         nx.draw_networkx_edges(
             G, pos, edgelist=[(u, v)], ax=ax,
             edge_color=hl_color if is_hl else GRAPH_STYLE["edge_color"],
             width=2.6 if is_hl else 1.4,
             arrows=True, arrowstyle="-|>", arrowsize=16,
             node_size=node_size, min_source_margin=15, min_target_margin=15,
+            connectionstyle=f"arc3,rad={rad}",
         )
-    nx.draw_networkx_nodes(
-        G, pos, ax=ax, node_size=node_size,
-        node_color=GRAPH_STYLE["node_fill"],
-        edgecolors=GRAPH_STYLE["node_edge_color"],
-        linewidths=GRAPH_STYLE["node_edge_width"],
+
+    other = [n for n in G.nodes() if n not in highlight_nodes]
+    _draw_grouped_nodes(G, pos, ax, other, node_size, node_groups,
+                        group_colors, group_legend)
+    if highlight_nodes:
+        nx.draw_networkx_nodes(
+            G, pos, ax=ax, nodelist=highlight_nodes,
+            node_color=GRAPH_STYLE["node_fill"],
+            edgecolors=GRAPH_STYLE["highlight_node_edge_color"],
+            linewidths=GRAPH_STYLE["highlight_node_edge_width"],
+            node_size=node_size + GRAPH_STYLE["highlight_node_size_delta"],
+        )
+
+    if show_labels:
+        nx.draw_networkx_labels(
+            G, pos, labels=labels, ax=ax,
+            font_size=DAG_LABEL_FONTSIZE, font_color=COLORS["text"],
+        )
+
+    # The SAME annotation machinery draw_graph uses — collision-aware placement,
+    # wedge-fitted offsets, conditional self-decoding captions. Not a reimplementation.
+    _draw_node_annotations(
+        G, pos, ax, node_size=node_size,
+        above=node_values, below=node_values_below,
+        above_caption=value_caption, below_caption=below_caption,
+        value_format=value_format,
     )
-    nx.draw_networkx_labels(
-        G, pos, labels=labels, ax=ax,
-        font_size=DAG_LABEL_FONTSIZE, font_color=COLORS["text"],
-    )
+
     ax.set_axis_off()
+    return pos
 
 
 # -----------------------------------------------------------------------------
@@ -626,13 +837,70 @@ def _exchange_value_label(v):
 # failure (identical collision set at three figure sizes: it is driven by edge
 # ANGLE, not by figure scale).
 
+def _decimal_label(v, places=None):
+    """Plain-text DECIMAL label — e.g. 0.307. No mathtext, no ``$``."""
+    places = GRAPH_STYLE["score_decimal_places"] if places is None else places
+    return f"{float(v):.{places}f}"
+
+
+def _row_formatter(values, value_format="auto"):
+    """Pick ONE formatter for a whole annotation row — fractions or decimals.
+
+    Chosen per ROW, never per value: a row reading "1/2, 0.307, 1/16" would be
+    unreadable, so the decision has to see every value before it is made.
+
+    ``"auto"`` keeps exact fractions while they stay legible and switches the
+    whole row to decimals once any denominator passes
+    ``score_fraction_max_denominator``. That threshold is not arbitrary — it is
+    set above every denominator the chapter actually prints (the worst are 1/32,
+    9/29, 13/30, 7/17, 4/13), so every worked example in Ch.13-14 renders as the
+    EXACT fraction the book shows, while the scaled rule at s = 0.85 — whose
+    exact values are honestly things like 168/547 and 61/949 — renders as 0.307
+    and 0.064. Both are the same number; only one of them teaches anything.
+    """
+    if value_format == "fraction":
+        return _exchange_value_label
+    if value_format == "decimal":
+        return _decimal_label
+    if value_format != "auto":
+        raise ValueError(
+            f"value_format must be 'auto', 'fraction' or 'decimal', "
+            f"got {value_format!r}")
+
+    cap = GRAPH_STYLE["score_fraction_max_denominator"]
+    for v in values:
+        if isinstance(v, str):
+            continue                       # authored text passes through verbatim
+        try:
+            if Fraction(v).limit_denominator(10 ** 9).denominator > cap:
+                return _decimal_label
+        except (TypeError, ValueError):
+            continue
+    return _exchange_value_label
+
+
 def _incident_angles(G, pos, node):
-    """Directions (radians) of every edge leaving ``node``, in data space."""
+    """Directions (radians) of every edge touching ``node``, in data space.
+
+    On a DIRECTED graph ``G.neighbors()`` yields SUCCESSORS ONLY. That is the
+    wrong set for collision avoidance: an edge arriving at a node runs through
+    the space beside it exactly as an edge leaving it does, so a label placed
+    using out-edges alone will happily be dropped on top of an in-edge. Both
+    directions are collected here (deduplicated, order preserved).
+
+    An UNDIRECTED graph is untouched — ``neighbors()`` there already means every
+    incident edge, and ``is_directed()`` is False — so ``draw_graph`` keeps its
+    byte-identical placement.
+    """
     if node not in pos:
         return []
     x, y = pos[node]
+    nbrs = list(G.neighbors(node))
+    if G.is_directed():
+        seen = set(nbrs)
+        nbrs += [p for p in G.predecessors(node) if p not in seen]
     angles = []
-    for nb in G.neighbors(node):
+    for nb in nbrs:
         if nb == node or nb not in pos:
             continue
         dx, dy = pos[nb][0] - x, pos[nb][1] - y
@@ -750,6 +1018,102 @@ def _fitted_distance(text, theta, edge_angles, base_dist):
     return min(need, base_dist * GRAPH_STYLE["annotation_max_offset"])
 
 
+def _tilt_ladder(span, step=math.radians(6)):
+    """Tilts to try, smallest first, alternating sides: 0, +6, -6, +12, -12 ...
+
+    Smallest-first keeps a nudged label as close to its canonical above/below
+    position as the geometry allows — the point is to clear the collision, not to
+    wander. Alternating sides keeps the search unbiased between left and right.
+    """
+    yield 0.0
+    i = 1
+    while i * step <= span:
+        yield i * step
+        yield -i * step
+        i += 1
+
+
+def _data_per_point(ax):
+    """Data units per typographic point. ``None`` if the axes has no extent yet.
+
+    The placement search below reasons in DATA space (nodes and edges live
+    there), but label offsets are in POINTS. This is the bridge. Equal aspect is
+    already locked by ``frame_signed_axes``, so one scale serves both axes.
+    """
+    try:
+        bb = ax.get_window_extent()
+    except Exception:
+        return None
+    x0, x1 = ax.get_xlim()
+    y0, y1 = ax.get_ylim()
+    if bb.width <= 0 or bb.height <= 0 or x1 == x0 or y1 == y0:
+        return None
+    # EQUAL ASPECT (locked by frame_signed_axes) means the data box is fitted
+    # inside the axes box preserving shape, so the BINDING dimension is whichever
+    # needs more room per pixel — and it is not always x. A tall, narrow layout
+    # (Fig 14.16's two stacked columns) is bound by y: assuming x, as this did at
+    # first, understates the data-per-point scale, which shrinks every computed
+    # label box and makes the collision search declare a clean figure that is not.
+    # The symptom is diagnostic and counter-intuitive: giving a tall graph MORE
+    # vertical room made the collisions WORSE, because more y-range meant more
+    # compression, and the error scaled with it. Taking the max fixes it.
+    return max(abs(x1 - x0) / bb.width,
+               abs(y1 - y0) / bb.height) * (ax.figure.dpi / 72.0)
+
+
+def _seg_box_clear(box, p, q, margin):
+    """Is the segment p-q clear of the axis-aligned ``box`` (cx, cy, hw, hh)?"""
+    cx, cy, hw, hh = box
+    hw, hh = hw + margin, hh + margin
+    (px, py), (qx, qy) = p, q
+    # Separating-axis on the box's two axes: if the segment's extent misses the
+    # slab on either axis, they cannot touch.
+    if max(px, qx) < cx - hw or min(px, qx) > cx + hw:
+        return True
+    if max(py, qy) < cy - hh or min(py, qy) > cy + hh:
+        return True
+    # Separating axis along the segment's own normal.
+    dx, dy = qx - px, qy - py
+    if dx == 0 and dy == 0:
+        return False
+    nx_, ny_ = -dy, dx
+    norm = math.hypot(nx_, ny_)
+    nx_, ny_ = nx_ / norm, ny_ / norm
+    dist = abs((cx - px) * nx_ + (cy - py) * ny_)
+    reach = hw * abs(nx_) + hh * abs(ny_)
+    return dist > reach
+
+
+def _boxes_overlap(a, b, margin):
+    return (abs(a[0] - b[0]) < a[2] + b[2] + margin
+            and abs(a[1] - b[1]) < a[3] + b[3] + margin)
+
+
+def _placement_cost(box, node, pos, edges_xy, placed, node_r, margin):
+    """How badly a candidate label box collides. 0 == clean.
+
+    Counts every edge in the WHOLE graph, not just the node's own — which is the
+    generalization L6 forced. A label on a dense layered graph collides with
+    edges that merely pass NEARBY (in Fig 14.6 the long D→A / E→A links run right
+    past B and C), and with OTHER nodes' labels. The 0.7.0 rule looked only at a
+    node's incident edges, which is why those collisions got through: on Lesson
+    5's sparse graphs there was nothing else close enough to hit.
+    """
+    cost = 0
+    for (p, q) in edges_xy:
+        if not _seg_box_clear(box, p, q, margin):
+            cost += 2
+    for other in placed:
+        if _boxes_overlap(box, other, margin):
+            cost += 3
+    for n, (x, y) in pos.items():
+        if n == node:
+            continue
+        if _boxes_overlap(box, (x, y, node_r, node_r), margin * 0.5):
+            cost += 3
+    return cost
+
+
 def _annotate_offset(ax, ax_xy, text, theta, dist, gid, **kw):
     """Place ``text`` at ``dist`` POINTS from ``ax_xy`` along direction ``theta``.
 
@@ -769,6 +1133,248 @@ def _annotate_offset(ax, ax_xy, text, theta, dist, gid, **kw):
     return art
 
 
+def _draw_node_annotations(G, pos, ax, *, node_size, above=None, below=None,
+                           above_caption=None, below_caption=None,
+                           pendant_stub=False, value_format="fraction"):
+    """Annotate an ABOVE row and a BELOW row of per-node values, with a caption.
+
+    THE ONE PLACE node-value annotation happens. ``draw_graph`` (undirected) and
+    ``draw_directed_graph`` both call it, so the collision-aware placement rules
+    that 0.7.0 built — angle-driven free-direction search, wedge-fitted radial
+    distance, conditional self-decoding row captions — apply identically to a
+    directed figure without being reimplemented for it. A second copy of this
+    logic is exactly how the two renderers drifted apart in the first place.
+
+    The two rows are GENERIC (an above row and a below row); the CALLER supplies
+    what they mean via the captions. Lesson 5 reads them as "value" / "outside
+    option"; Lesson 6 reads them as e.g. "hub score" / "authority score" — the
+    same machinery, because the placement problem is identical and only the
+    words change.
+
+    Rows are filtered to nodes that are actually drawn, and the caption names
+    only the rows that survive that filter — so a row that empties out
+    mid-interaction takes its caption with it rather than stranding a heading
+    over nothing.
+    """
+    value_row = {n: v for n, v in (above or {}).items() if n in pos}
+    outside_row = {n: v for n, v in (below or {}).items() if n in pos}
+    if not (value_row or outside_row):
+        return
+
+    # ONE formatter across BOTH rows — a figure that mixed "1/2" above with
+    # "0.307" below would read as two different quantities.
+    fmt = _row_formatter(list(value_row.values()) + list(outside_row.values()),
+                         value_format)
+
+    radius_pts = math.sqrt(node_size / math.pi)
+    annot_offset = radius_pts + GRAPH_STYLE["value_annotation_gap"]
+    safe = math.radians(GRAPH_STYLE["annotation_free_angle"])
+    max_tilt = math.radians(GRAPH_STYLE["annotation_max_tilt"])
+    up, down = math.pi / 2, -math.pi / 2
+
+    below_reach = []   # how far below its node each below-label hangs, in points
+
+    # Global collision context. `dpp` converts the point-based label offsets into
+    # the data space the nodes and edges live in; when the axes has no extent yet
+    # it is None and the search degrades to the 0.7.0 local rule, which is a safe
+    # floor rather than a crash.
+    dpp = _data_per_point(ax)
+    edges_xy = [(pos[u], pos[v]) for u, v in G.edges()
+                if u in pos and v in pos and u != v]
+    node_r = math.sqrt(node_size / math.pi) * (dpp or 0)
+    placed = []
+
+    def place(node, val, base, gid, base_dist=None):
+        """Position one label: keep the 0.7.0 placement if it is clean, else move.
+
+        THE DEFAULT PATH IS BIT-FOR-BIT THE OLD ONE. The angle-driven local
+        placement is computed exactly as before and, if it collides with nothing,
+        used verbatim — so every figure that was already clean (all 681 in the
+        deployed corpus) is untouched, and this cannot regress them. Only a label
+        that would actually land on an edge, a node, or another label enters the
+        search below. Same discipline as 0.7.0's tilt rule: bite only when there
+        is something to fix.
+        """
+        edges = _incident_angles(G, pos, node)
+        label = fmt(val)
+        theta = _free_direction(edges, base, safe=safe, max_tilt=max_tilt)
+        dist = base_dist if base_dist is not None else annot_offset
+        dist = _fitted_distance(label, theta, edges, dist)
+
+        if dpp:
+            hw = 0.5 * max(len(label), 1) * GRAPH_STYLE["value_annotation_size"] \
+                * GRAPH_STYLE["annotation_char_width"] * dpp
+            hh = 0.5 * GRAPH_STYLE["value_annotation_size"] \
+                * GRAPH_STYLE["annotation_line_height"] * dpp
+            margin = GRAPH_STYLE["annotation_edge_margin"] * dpp * 0.5
+
+            def box_at(th, d):
+                x, y = pos[node]
+                return (x + d * dpp * math.cos(th), y + d * dpp * math.sin(th),
+                        hw, hh)
+
+            best = (theta, dist)
+            best_cost = _placement_cost(box_at(theta, dist), node, pos, edges_xy,
+                                        placed, node_r, margin)
+            if best_cost:
+                # Widen the search: the label may swing further off vertical and
+                # stand further out than the local rule would ever have moved it.
+                span = math.radians(GRAPH_STYLE["annotation_collision_max_tilt"])
+                for mult in GRAPH_STYLE["annotation_collision_distances"]:
+                    for tilt in _tilt_ladder(span):
+                        th = base + tilt
+                        d = dist * mult
+                        c = _placement_cost(box_at(th, d), node, pos, edges_xy,
+                                            placed, node_r, margin)
+                        if c < best_cost:
+                            best_cost, best = c, (th, d)
+                        if not best_cost:
+                            break
+                    if not best_cost:
+                        break
+            theta, dist = best
+            placed.append(box_at(theta, dist))
+
+        _annotate_offset(ax, pos[node], label, theta, dist, gid)
+        return dist
+
+    for node, val in value_row.items():
+        place(node, val, up, "cs470:value")
+
+    for node, val in outside_row.items():
+        if not pendant_stub:
+            # Same collision-aware search as the above row. The pendant path
+            # below is left exactly as it was: its geometry is tuned to the
+            # fixed-length stub it hangs off, and its only consumers (Lesson 5's
+            # wide horizontal paths) are already collision-free.
+            below_reach.append(place(node, val, down, "cs470:outside"))
+            continue
+
+        edges = _incident_angles(G, pos, node)
+        theta = _free_direction(edges, down, safe=safe, max_tilt=max_tilt)
+        label = fmt(val)
+        dist = _fitted_distance(label, theta, edges, annot_offset)
+        if pendant_stub:
+            # A stub of FIXED length in points — drawn as an annotate offset so it
+            # lives in display space. (The old rule took a fraction of the median
+            # edge length, a DATA-unit quantity, and applied it along y; on a flat
+            # layout the y data->display scale explodes and the stub ran ~30x long.)
+            # zorder 0 tucks it under the node marker, so the stub reads as leaving
+            # the circle rather than starting at its center.
+            stub = GRAPH_STYLE["pendant_stub_len_pts"]
+            ax.annotate(
+                "", xy=pos[node], xycoords="data",
+                textcoords="offset points",
+                xytext=(stub * math.cos(theta), stub * math.sin(theta)),
+                arrowprops=dict(
+                    arrowstyle="-", shrinkA=0, shrinkB=0,
+                    linestyle=GRAPH_STYLE["pendant_stub_style"],
+                    color=GRAPH_STYLE["pendant_stub_color"],
+                    linewidth=GRAPH_STYLE["pendant_stub_width"],
+                ),
+                annotation_clip=False, zorder=0,
+            )
+            # The STUB is fixed-length; the LABEL still has to clear the wedge. On
+            # the pendant's intended consumers (wide horizontal paths) nothing is
+            # tilted, so the label lands right off the stub end as designed; in a
+            # tight wedge it slides further out rather than being pulled back into
+            # an incident edge.
+            dist = _fitted_distance(label, theta, edges,
+                                    stub + GRAPH_STYLE["pendant_label_gap"])
+        below_reach.append(dist)
+        _annotate_offset(ax, pos[node], label, theta, dist, "cs470:outside")
+
+    # Row caption — CONDITIONAL. Names only the rows that are populated, so a
+    # figure carrying just one row announces that row and nothing else, and a row
+    # that disappears mid-interaction takes its caption with it (5.1's no-deal
+    # region drops the value row, and a static heading would be left stranded
+    # over an empty row).
+    #
+    # Anchored to the CONTENT, not to an axes fraction: y at the lowest node in
+    # DATA coords, then dropped a fixed number of POINTS below the deepest label
+    # that hangs off it. An axes-fraction anchor is not usable here — the axes box
+    # bears no fixed relation to the drawn graph (equal aspect leaves slack, and a
+    # 2-node layout is degenerate in y), so "6% below the axes" lands inside the
+    # figure on the stem and far adrift on the 2-node one. x rides the axes centre.
+    caption = GRAPH_STYLE["row_caption_sep"].join(
+        part for part, present in (
+            (above_caption, value_row),
+            (below_caption, outside_row),
+        ) if present and part
+    )
+    if caption:
+        drop = (max(below_reach, default=annot_offset)
+                + GRAPH_STYLE["value_annotation_size"] * GRAPH_STYLE["annotation_line_height"]
+                + GRAPH_STYLE["row_caption_gap"])
+        anchor = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
+        cap = ax.annotate(
+            caption, xy=(0.5, min(y for _, y in pos.values())), xycoords=anchor,
+            textcoords="offset points", xytext=(0, -drop),
+            ha="center", va="top", annotation_clip=False,
+            fontsize=GRAPH_STYLE["row_caption_size"],
+            family="sans-serif", color=GRAPH_STYLE["row_caption_color"],
+        )
+        cap.set_gid("cs470:rowcap")
+
+
+def _resolve_group_colors(groups, group_colors=None):
+    """Map each group name to a palette color, in first-appearance order.
+
+    A caller may pin any subset via ``group_colors`` (naming either a ``COLORS``
+    token — "accent" — or a literal color). Unpinned groups take the bow-tie
+    semantic color if their name is a bow-tie role, else the next color off
+    ``GROUP_COLOR_CYCLE``. No literals here or in the render code: every color
+    resolves to a ``COLORS`` token.
+    """
+    pinned = {}
+    for g, c in (group_colors or {}).items():
+        pinned[g] = COLORS.get(c, c)      # a COLORS token, or a literal color
+
+    seen = []
+    for g in groups:
+        if g not in seen:
+            seen.append(g)                # first-appearance order == stable
+
+    out = {}
+    nxt = 0
+    for g in seen:
+        if g in pinned:
+            out[g] = pinned[g]
+        elif g in BOWTIE_COLORS:
+            out[g] = BOWTIE_COLORS[g]
+        else:
+            out[g] = GROUP_COLOR_CYCLE[nxt % len(GROUP_COLOR_CYCLE)]
+            nxt += 1
+    return out
+
+
+def _draw_group_legend(ax, colors_by_group):
+    """A legend decoding the node colors — the figure must decode ITSELF.
+
+    A node colored orange means nothing without this. Same principle as the
+    conditional row caption: an annotation the reader cannot decode from the
+    figure alone is a defect, not a decoration.
+    """
+    if not colors_by_group:
+        return
+    handles = [
+        mlines.Line2D([], [], marker="o", linestyle="none",
+                      markersize=GRAPH_STYLE["group_legend_marker_size"],
+                      markerfacecolor=c, markeredgecolor=c,
+                      alpha=GRAPH_STYLE["group_fill_alpha"], label=str(g))
+        for g, c in colors_by_group.items()
+    ]
+    leg = ax.legend(
+        handles=handles, loc="upper center",
+        bbox_to_anchor=GRAPH_STYLE["group_legend_anchor"],
+        ncol=min(len(handles), GRAPH_STYLE["group_legend_max_cols"]),
+        frameon=False, handletextpad=0.3, columnspacing=1.1,
+        fontsize=GRAPH_STYLE["group_legend_size"],
+    )
+    for txt in leg.get_texts():
+        txt.set_color(COLORS["text"])
+
+
 def draw_graph(
     G,
     ax,
@@ -784,6 +1390,9 @@ def draw_graph(
     node_values=None,
     outside_options=None,
     pendant_stub=False,
+    node_groups=None,
+    group_colors=None,
+    group_legend=True,
 ):
     """Draw a networkx graph in the project's style.
 
@@ -967,16 +1576,14 @@ def draw_graph(
             width=GRAPH_STYLE["matched_edge_width"],
         )
 
-    # Nodes: highlighted ones drawn with thicker accent-color edge
+    # Nodes: highlighted ones drawn with thicker accent-color edge. When
+    # node_groups is supplied the un-highlighted nodes are drawn per-group
+    # instead (categorical fill + matching border); highlight still wins on top,
+    # so "color by bow-tie role AND mark the node under discussion" composes.
     other = [n for n in G.nodes() if n not in highlight_nodes]
     if other:
-        nx.draw_networkx_nodes(
-            G, pos, ax=ax, nodelist=other,
-            node_color=GRAPH_STYLE["node_fill"],
-            edgecolors=GRAPH_STYLE["node_edge_color"],
-            linewidths=GRAPH_STYLE["node_edge_width"],
-            node_size=node_size,
-        )
+        _draw_grouped_nodes(G, pos, ax, other, node_size, node_groups,
+                            group_colors, group_legend)
     if highlight_nodes:
         nx.draw_networkx_nodes(
             G, pos, ax=ax, nodelist=highlight_nodes,
@@ -996,102 +1603,199 @@ def draw_graph(
             font_size=GRAPH_STYLE["label_font_size"],
         )
 
-    # Bargaining-outcome annotations (Lesson 5). Both default off. Offsets are in
-    # typographic points added to the node radius so text clears the circle at
-    # any node_size; annotation_clip=False keeps them visible past the (invisible)
-    # axes frame under the project's tight bbox at save/inline time.
-    # Only rows that actually land on a drawn node count as populated. This is
-    # what the row caption is conditioned on, so it must reflect what is really
-    # rendered — not merely what was passed in.
-    value_row = {n: v for n, v in (node_values or {}).items() if n in pos}
-    outside_row = {n: v for n, v in (outside_options or {}).items() if n in pos}
-
-    if value_row or outside_row:
-        radius_pts = math.sqrt(node_size / math.pi)
-        annot_offset = radius_pts + GRAPH_STYLE["value_annotation_gap"]
-        safe = math.radians(GRAPH_STYLE["annotation_free_angle"])
-        max_tilt = math.radians(GRAPH_STYLE["annotation_max_tilt"])
-        up, down = math.pi / 2, -math.pi / 2
-
-    below_reach = []   # how far below its node each outside label hangs, in points
-
-    for node, val in value_row.items():
-        edges = _incident_angles(G, pos, node)
-        theta = _free_direction(edges, up, safe=safe, max_tilt=max_tilt)
-        label = _exchange_value_label(val)
-        _annotate_offset(ax, pos[node], label, theta,
-                         _fitted_distance(label, theta, edges, annot_offset),
-                         "cs470:value")
-
-    for node, val in outside_row.items():
-        edges = _incident_angles(G, pos, node)
-        theta = _free_direction(edges, down, safe=safe, max_tilt=max_tilt)
-        label = _exchange_value_label(val)
-        dist = _fitted_distance(label, theta, edges, annot_offset)
-        if pendant_stub:
-            # A stub of FIXED length in points — drawn as an annotate offset so it
-            # lives in display space. (The old rule took a fraction of the median
-            # edge length, a DATA-unit quantity, and applied it along y; on a flat
-            # layout the y data->display scale explodes and the stub ran ~30x long.)
-            # zorder 0 tucks it under the node marker, so the stub reads as leaving
-            # the circle rather than starting at its center.
-            stub = GRAPH_STYLE["pendant_stub_len_pts"]
-            ax.annotate(
-                "", xy=pos[node], xycoords="data",
-                textcoords="offset points",
-                xytext=(stub * math.cos(theta), stub * math.sin(theta)),
-                arrowprops=dict(
-                    arrowstyle="-", shrinkA=0, shrinkB=0,
-                    linestyle=GRAPH_STYLE["pendant_stub_style"],
-                    color=GRAPH_STYLE["pendant_stub_color"],
-                    linewidth=GRAPH_STYLE["pendant_stub_width"],
-                ),
-                annotation_clip=False, zorder=0,
-            )
-            # The STUB is fixed-length; the LABEL still has to clear the wedge. On
-            # the pendant's intended consumers (wide horizontal paths) nothing is
-            # tilted, so the label lands right off the stub end as designed; in a
-            # tight wedge it slides further out rather than being pulled back into
-            # an incident edge.
-            dist = _fitted_distance(label, theta, edges,
-                                    stub + GRAPH_STYLE["pendant_label_gap"])
-        below_reach.append(dist)
-        _annotate_offset(ax, pos[node], label, theta, dist, "cs470:outside")
-
-    # Row caption — CONDITIONAL. Names only the rows that are populated, so a
-    # figure carrying just outside options announces "outside option" and nothing
-    # else, and a row that disappears mid-interaction takes its caption with it
-    # (5.1's no-deal region drops the value row live, and a static heading would
-    # be left stranded over an empty row).
-    #
-    # Anchored to the CONTENT, not to an axes fraction: y at the lowest node in
-    # DATA coords, then dropped a fixed number of POINTS below the deepest label
-    # that hangs off it. An axes-fraction anchor is not usable here — the axes box
-    # bears no fixed relation to the drawn graph (equal aspect leaves slack, and a
-    # 2-node layout is degenerate in y), so "6% below the axes" lands inside the
-    # figure on the stem and far adrift on the 2-node one. x rides the axes centre.
-    caption = GRAPH_STYLE["row_caption_sep"].join(
-        part for part, present in (
-            (GRAPH_STYLE["value_row_caption"], value_row),
-            (GRAPH_STYLE["outside_row_caption"], outside_row),
-        ) if present
+    # Bargaining-outcome annotations (Lesson 5). Both default off. The placement
+    # machinery is shared with draw_directed_graph — see _draw_node_annotations.
+    _draw_node_annotations(
+        G, pos, ax, node_size=node_size,
+        above=node_values, below=outside_options,
+        above_caption=GRAPH_STYLE["value_row_caption"],
+        below_caption=GRAPH_STYLE["outside_row_caption"],
+        pendant_stub=pendant_stub,
     )
-    if caption:
-        drop = (max(below_reach, default=annot_offset)
-                + GRAPH_STYLE["value_annotation_size"] * GRAPH_STYLE["annotation_line_height"]
-                + GRAPH_STYLE["row_caption_gap"])
-        anchor = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
-        cap = ax.annotate(
-            caption, xy=(0.5, min(y for _, y in pos.values())), xycoords=anchor,
-            textcoords="offset points", xytext=(0, -drop),
-            ha="center", va="top", annotation_clip=False,
-            fontsize=GRAPH_STYLE["row_caption_size"],
-            family="sans-serif", color=GRAPH_STYLE["row_caption_color"],
-        )
-        cap.set_gid("cs470:rowcap")
 
     ax.set_axis_off()
     return pos
+
+
+# -----------------------------------------------------------------------------
+# Generic matrix / iteration-table renderer (Lesson 6)
+# -----------------------------------------------------------------------------
+#
+# Nothing generic existed: draw_payoff_matrix is 2-player-game-specific and
+# draw_auction_table is auction-specific, so the adjacency matrix M, the flow
+# matrix N, the scaled matrix Ñ and the k-step score tables all had nowhere to
+# land. One renderer covers both shapes, because they differ only in chrome:
+#
+#   style="matrix" — bracketed grid, labels OUTSIDE the brackets. It is a matrix:
+#                    an object with rows and columns, and the brackets say so.
+#   style="table"  — booktabs rules, a header row and a label column. It is a
+#                    table: a log of iterations, read down the steps.
+
+MATRIX_STYLE = {
+    "cell_fontsize":    11,
+    "label_fontsize":   11,
+    "header_fontsize":  11,
+    "corner_fontsize":  10,
+    "title_fontsize":   12,
+    "note_fontsize":    10,
+    "cell_w":           1.0,        # axes units
+    "cell_h":           0.62,
+    "label_color":      COLORS["primary"],
+    "cell_color":       COLORS["text"],
+    "bracket_color":    COLORS["primary"],
+    "bracket_width":    1.6,
+    "bracket_tick":     0.16,       # serif length on the [ ] arms
+    "bracket_pad":      0.30,
+    "rule_color":       COLORS["primary"],
+    "rule_width":       1.4,
+    "thin_rule_width":  0.7,
+    "highlight_fill":   COLORS["highlight"],
+    "highlight_alpha":  0.20,
+    "highlight_text":   COLORS["accent"],
+    "note_color":       COLORS["primary"],
+}
+
+
+def draw_matrix(ax, values, *, row_labels=None, col_labels=None, corner=None,
+                style="matrix", highlight_cells=None, highlight_rows=None,
+                title=None, note=None, row_title=None, col_title=None,
+                value_format="auto"):
+    """Render a matrix (bracketed) or an iteration table (booktabs) on ``ax``.
+
+    ``values``  — a 2D sequence. Entries may be int / float / Fraction / str and
+    render as PLAIN TEXT, so ``Fraction(4, 13)`` becomes ``4/13`` and never
+    ``$\\frac{4}{13}$``. Figure labels must not go through mathtext — matplotlib
+    decides mathtext on the PARITY of ``$`` in the whole string, so a stray one
+    silently swallows the rest of the label (the Lesson-4 double-wrap crash
+    class). Lesson 6's cells are almost all fractions, which is exactly where
+    this bites.
+
+    ``value_format`` picks fractions or decimals for the WHOLE grid at once (see
+    ``_row_formatter``): the flow matrix N is exact small fractions, but the
+    scaled Ñ at s = 0.85 is not, and a grid mixing the two would be unreadable.
+
+    ``highlight_cells`` — ``[(i, j), ...]`` tinted and re-colored: "here is the
+    entry the question is about". ``highlight_rows`` — ``[i, ...]``, for marking
+    the step of an iteration table under discussion.
+
+    ``corner`` is the top-left cell (e.g. ``"step"``); ``row_title`` /
+    ``col_title`` are axis names written outside the labels (e.g. ``"from"`` /
+    ``"to"`` on an adjacency matrix, which is the distinction the whole M-vs-Mᵀ
+    confusion turns on).
+    """
+    if style not in ("matrix", "table"):
+        raise ValueError(f"style must be 'matrix' or 'table', got {style!r}")
+
+    st = MATRIX_STYLE
+    rows = [list(r) for r in values]
+    nrow = len(rows)
+    ncol = len(rows[0]) if nrow else 0
+    if not nrow or not ncol:
+        ax.set_axis_off()
+        return
+
+    row_labels = list(row_labels or [""] * nrow)
+    col_labels = list(col_labels or [""] * ncol)
+    hl_cells = {tuple(c) for c in (highlight_cells or [])}
+    hl_rows = set(highlight_rows or [])
+
+    cw, ch = st["cell_w"], st["cell_h"]
+    has_rowlab = any(str(x) for x in row_labels) or corner
+    x0 = cw if has_rowlab else 0.0            # grid starts after the label column
+    y0 = 0.0                                  # header row sits above y0
+
+    def cx(j):
+        return x0 + (j + 0.5) * cw
+
+    def cy(i):
+        return y0 - (i + 0.5) * ch
+
+    ax.set_xlim(-0.15 * cw, x0 + ncol * cw + 0.15 * cw)
+    ax.set_ylim(-(nrow * ch) - 1.15 * ch, 1.45 * ch)
+    ax.set_aspect("auto")
+    ax.autoscale(False)
+    ax.set_axis_off()
+
+    # tints first, so text and rules land on top
+    for i in range(nrow):
+        if i in hl_rows:
+            ax.add_patch(Rectangle((x0, cy(i) - ch / 2), ncol * cw, ch,
+                                   facecolor=st["highlight_fill"],
+                                   alpha=st["highlight_alpha"],
+                                   edgecolor="none", zorder=0))
+    for (i, j) in hl_cells:
+        if 0 <= i < nrow and 0 <= j < ncol:
+            ax.add_patch(Rectangle((x0 + j * cw, cy(i) - ch / 2), cw, ch,
+                                   facecolor=st["highlight_fill"],
+                                   alpha=st["highlight_alpha"],
+                                   edgecolor="none", zorder=0))
+
+    # column headers
+    for j, lab in enumerate(col_labels):
+        if str(lab):
+            ax.text(cx(j), y0 + 0.42 * ch, str(lab), ha="center", va="center",
+                    fontsize=st["header_fontsize"],
+                    fontweight="bold" if style == "table" else "normal",
+                    color=st["label_color"])
+    # row labels
+    for i, lab in enumerate(row_labels):
+        if str(lab):
+            ax.text(x0 - 0.35 * cw, cy(i), str(lab), ha="right", va="center",
+                    fontsize=st["label_fontsize"],
+                    fontweight="bold" if style == "table" else "normal",
+                    color=st["label_color"])
+    if corner:
+        ax.text(x0 - 0.35 * cw, y0 + 0.42 * ch, str(corner),
+                ha="right", va="center", fontsize=st["corner_fontsize"],
+                fontweight="bold" if style == "table" else "normal",
+                color=st["label_color"])
+
+    # cells — one formatter for the whole grid, decided over every entry
+    fmt = _row_formatter([v for r in rows for v in r], value_format)
+    for i in range(nrow):
+        for j in range(ncol):
+            hot = (i, j) in hl_cells
+            ax.text(cx(j), cy(i), fmt(rows[i][j]),
+                    ha="center", va="center", fontsize=st["cell_fontsize"],
+                    color=st["highlight_text"] if hot else st["cell_color"],
+                    fontweight="bold" if hot else "normal")
+
+    if style == "matrix":
+        # square brackets around the numeric grid (NOT around the labels)
+        pad = st["bracket_pad"] * ch
+        top, bot = y0 - pad * 0.4, y0 - nrow * ch + pad * 0.4
+        left, right = x0 - 0.10 * cw, x0 + ncol * cw + 0.10 * cw
+        tick = st["bracket_tick"] * cw
+        for xx, dx in ((left, tick), (right, -tick)):
+            ax.plot([xx, xx], [top, bot], color=st["bracket_color"],
+                    linewidth=st["bracket_width"], zorder=3)
+            ax.plot([xx, xx + dx], [top, top], color=st["bracket_color"],
+                    linewidth=st["bracket_width"], zorder=3)
+            ax.plot([xx, xx + dx], [bot, bot], color=st["bracket_color"],
+                    linewidth=st["bracket_width"], zorder=3)
+    else:
+        # booktabs rules: top, under the header, bottom
+        for yy, w in ((y0 + 0.18 * ch, st["rule_width"]),
+                      (y0, st["thin_rule_width"]),
+                      (y0 - nrow * ch, st["rule_width"])):
+            ax.plot([x0 - cw if has_rowlab else x0, x0 + ncol * cw], [yy, yy],
+                    color=st["rule_color"], linewidth=w, zorder=2)
+
+    if col_title:
+        ax.text(x0 + ncol * cw / 2, y0 + 1.05 * ch, str(col_title),
+                ha="center", va="center", fontsize=st["note_fontsize"],
+                style="italic", color=st["note_color"])
+    if row_title:
+        ax.text(x0 - 1.15 * cw, y0 - nrow * ch / 2, str(row_title),
+                ha="center", va="center", fontsize=st["note_fontsize"],
+                style="italic", color=st["note_color"], rotation=90)
+    if title:
+        ax.set_title(str(title), fontsize=st["title_fontsize"],
+                     color=COLORS["primary"], pad=8)
+    if note:
+        ax.text(x0 + ncol * cw / 2, y0 - nrow * ch - 0.65 * ch, str(note),
+                ha="center", va="center", fontsize=st["note_fontsize"],
+                color=st["note_color"])
 
 
 # -----------------------------------------------------------------------------

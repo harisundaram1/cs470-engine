@@ -567,20 +567,231 @@ def _resolve_graph_annotations(figure_spec: dict, G) -> dict:
     }
 
 
-def _render_graph(figure_spec: dict) -> None:
-    """Render a ``kind: graph`` figure spec (the default kind).
+# -----------------------------------------------------------------------------
+# Figure-spec key validation — AN UNKNOWN KEY IS AN ERROR, NOT A SHRUG
+# -----------------------------------------------------------------------------
+#
+# Until 0.8.0 the directed branch forwarded only `pos` and `labels`. An author
+# who wrote `directed: true` with `highlight_nodes: [...]` got a figure with no
+# highlight AND NO ERROR — the key simply evaporated. That is the same
+# silent-failure archetype as the old update_worksheet.sh (staged the notebook,
+# silently shipped no content) and the concept-cell placeholder (rendered
+# "unavailable" instead of raising): THE THING YOU ASKED FOR DOESN'T HAPPEN, AND
+# NOTHING TELLS YOU. It is the worst failure mode this project has, because it
+# survives every green test and only surfaces as a wrong figure in front of
+# students.
+#
+# So: every key a figure spec supplies must be one the SELECTED renderer actually
+# consumes, or the render raises. The allowlists are per-renderer, not per-kind,
+# because that is the resolution the bug lives at — `matching:` is meaningful to
+# the undirected renderer and meaningless to the directed one, and an author who
+# writes it on a directed graph must be told, not ignored.
 
-    Builds the networkx graph + layout, then forwards the FULL ``draw_graph``
-    parameter set: the previously-dropped ``highlight_edges``/``highlight_nodes``
-    AND the Lesson-5 outcome annotation layer (matched edges, node values,
-    outside options, pendant stubs). Derived bargaining values come from the
-    compute helpers (see ``_resolve_graph_annotations``), so a rendered outcome
-    can't drift from the definition it illustrates — matching
-    ``bipartite_market``'s anti-drift discipline. Directed figures keep their
-    existing ``draw_directed_graph`` path unchanged.
+_GRAPH_KEYS_COMMON = frozenset({
+    "kind", "ref", "directed", "nodes", "edges", "layout", "layout_seed",
+    "node_size", "show_labels", "highlight_nodes", "highlight_edges",
+    "node_values", "node_groups", "group_colors", "group_legend", "figsize",
+})
+# The Lesson-5 network-exchange layer. Bargaining concepts: an "outside option"
+# has no meaning on a directed web graph, so these are undirected-only and a
+# directed spec that names one is a mistake worth raising on.
+_GRAPH_KEYS_UNDIRECTED = frozenset({
+    "matching", "matched_edges", "outside_options", "pendant_stub", "edge_styles",
+})
+_GRAPH_KEYS_DIRECTED = frozenset({
+    "highlight_color", "node_values_below", "value_caption", "below_caption",
+    "curved_reciprocal", "value_format",
+})
+
+# `directed` is accepted on both link-analysis kinds and is HONORED (it must be
+# true — link analysis is defined on a digraph, and these renderers build one).
+# It is allowlisted rather than rejected because writing it is natural and the
+# renderer really does obey it; but `directed: false` is REJECTED below rather
+# than silently overridden to true, which would be the very bug this guard exists
+# to kill — the request quietly not happening.
+_MATRIX_KEYS = frozenset({
+    "kind", "ref", "directed", "nodes", "edges", "compute", "s", "values",
+    "row_labels", "col_labels", "corner", "style", "highlight_cells",
+    "highlight_rows", "title", "note", "row_title", "col_title", "value_format",
+})
+_ITERATION_TABLE_KEYS = frozenset({
+    "kind", "ref", "directed", "nodes", "edges", "compute", "rule", "s", "steps",
+    "highlight_rows", "highlight_cells", "title", "note", "corner", "style",
+    "value_format",
+})
+
+
+def _require_directed(kind: str, figure_spec: dict) -> dict:
+    """Link analysis is defined on a DIGRAPH. Honor `directed`, never override it."""
+    if "directed" in figure_spec and not figure_spec["directed"]:
+        raise ValueError(
+            f"figure kind {kind!r}: 'directed: false' cannot be honored — HITS, "
+            f"PageRank and the flow matrices are defined on a DIRECTED graph. "
+            f"Rather than silently render a directed one anyway, this raises. "
+            f"Drop the key (it defaults to directed) or set it true.")
+    spec = dict(figure_spec)
+    spec["directed"] = True
+    return spec
+
+_FIGURE_KEYS = {
+    "image":             frozenset({"kind", "ref", "path", "alt"}),
+    "payoff_matrix":     frozenset({"kind", "ref", "row_player", "col_player",
+                                    "row_strategies", "col_strategies",
+                                    "payoffs", "highlight"}),
+    "auction_table":     frozenset({"kind", "ref", "bids", "values", "format",
+                                    "labels", "note", "reserve", "compare",
+                                    "compare_headers", "mask_winner_price"}),
+    "bid_payoff_curve":  frozenset({"kind", "ref", "value", "highest_other",
+                                    "n", "mode", "reserve"}),
+    "revenue_curve":     frozenset({"kind", "ref", "curve", "seller_value",
+                                    "n_max"}),
+    "common_value_bids": frozenset({"kind", "ref", "common_value", "estimates"}),
+    "bipartite_market":  frozenset({"kind", "ref", "left", "right", "edges",
+                                    "valuations", "prices", "matching",
+                                    "constricted", "open_nodes", "derive",
+                                    "reveal", "column_titles"}),
+    "matrix":            _MATRIX_KEYS,
+    "iteration_table":   _ITERATION_TABLE_KEYS,
+}
+
+
+def _check_figure_keys(kind: str, spec: dict, allowed: frozenset,
+                       renderer: str) -> None:
+    """Raise if the spec carries a key ``renderer`` will not consume."""
+    unknown = sorted(set(spec) - allowed)
+    if not unknown:
+        return
+    raise ValueError(
+        f"figure kind {kind!r} ({renderer}): unknown key(s) "
+        f"{', '.join(repr(k) for k in unknown)}. This renderer would SILENTLY "
+        f"IGNORE them, so it raises instead. Known keys: "
+        f"{', '.join(sorted(allowed))}."
+    )
+
+
+# -----------------------------------------------------------------------------
+# Lesson-6 derived values — computed here, NEVER hardcoded in YAML
+# -----------------------------------------------------------------------------
+#
+# The standing rule: compute derived values in the dispatch, never type a literal
+# into a figure spec. Without it, ~20 Lesson-6 figures would each carry a
+# hand-typed score that can drift from the answer key with nothing to catch it.
+# So a spec asks for the CONCEPT and the dispatch runs the helper:
+#
+#     node_values: {compute: pagerank, rule: basic, step: 2}
+#     node_groups: {compute: bowtie}
+#
+# An explicit map is still accepted (it is sometimes the answer key itself), but
+# the computed form is the one to reach for.
+
+def _fraction_or(v, default=None):
+    return _exchange_num_fraction(v) if v is not None else default
+
+
+def _exchange_num_fraction(v):
+    return Fraction(v) if not isinstance(v, Fraction) else v
+
+
+def _compute_node_values(block: dict, G):
+    """Resolve a ``{compute: ...}`` node-value block to ``{node: Fraction}``."""
+    from .link_analysis import hits_iterations, pagerank_iterations, pagerank_limit
+
+    what = block.get("compute")
+    step = int(block.get("step", 1))
+    rule = block.get("rule", "basic")
+    s = _fraction_or(block.get("s"), Fraction(4, 5))
+
+    if what == "pagerank":
+        if block.get("limit"):
+            lim = pagerank_limit(G, rule=rule, s=s)
+            if lim.limit is None:
+                raise ValueError(
+                    f"node_values: pagerank limit requested, but the {rule} rule "
+                    f"does not converge on this graph ({lim.reason}). There is no "
+                    f"limiting vector to draw — render the cycle instead "
+                    f"(step: k), which is the point of the figure.")
+            return lim.limit
+        return pagerank_iterations(G, step, rule=rule, s=s)[step]
+
+    if what in ("hits_authority", "hits_hub"):
+        state = hits_iterations(G, step)[step]
+        return state["authority" if what == "hits_authority" else "hub"]
+
+    raise ValueError(
+        f"node_values: unknown compute {what!r}. Known: 'pagerank', "
+        f"'hits_authority', 'hits_hub'.")
+
+
+def _compute_node_groups(block: dict, G):
+    """Resolve a ``{compute: ...}`` node-group block to ``{node: group}``."""
+    from .link_analysis import bowtie_partition, strongly_connected_components
+
+    what = block.get("compute")
+    if what == "bowtie":
+        return bowtie_partition(G)
+    if what == "scc":
+        # strongly_connected_components() returns LARGEST FIRST, and group colors
+        # are assigned in first-appearance order — so emit the giant component's
+        # members before any singleton's. Otherwise a lone node that happens to
+        # sort first (Fig 13.5's "Student") takes the accent color and the giant
+        # SCC — the thing the figure is about — gets whatever is left.
+        comps = strongly_connected_components(G)
+        named = [(f"SCC {i + 1}" if len(c) > 1 else "singleton", c)
+                 for i, c in enumerate(comps)]
+        multi = [(g, c) for g, c in named if len(c) > 1]
+        singles = [(g, c) for g, c in named if len(c) == 1]
+        return {n: g for g, c in multi + singles for n in c}
+    raise ValueError(
+        f"node_groups: unknown compute {what!r}. Known: 'bowtie', 'scc'.")
+
+
+def _resolve_directed_annotations(figure_spec: dict, G) -> dict:
+    """The FULL ``draw_directed_graph`` kwarg set for a directed graph spec.
+
+    Through 0.7.0 this did not exist: the directed branch forwarded ``pos`` and
+    ``labels`` and dropped everything else. Highlights, node scores and grouping
+    are all forwarded here, and score/group values may be COMPUTED rather than
+    typed (see above).
     """
-    from .plot_style import draw_graph, draw_directed_graph, apply_ax_style
+    def _edges(key):
+        return [tuple(e) for e in (figure_spec.get(key) or [])]
 
+    nv = figure_spec.get("node_values")
+    nvb = figure_spec.get("node_values_below")
+    ng = figure_spec.get("node_groups")
+
+    def _values(block):
+        if block is None:
+            return {}
+        if isinstance(block, dict) and "compute" in block:
+            return _compute_node_values(block, G)
+        return dict(block)
+
+    node_groups = {}
+    if isinstance(ng, dict) and "compute" in ng:
+        node_groups = _compute_node_groups(ng, G)
+    elif ng:
+        node_groups = dict(ng)
+
+    return {
+        "highlight_nodes": list(figure_spec.get("highlight_nodes") or []),
+        "highlight_edges": _edges("highlight_edges"),
+        "highlight_color": figure_spec.get("highlight_color"),
+        "node_values": _values(nv),
+        "node_values_below": _values(nvb),
+        "value_caption": figure_spec.get("value_caption"),
+        "below_caption": figure_spec.get("below_caption"),
+        "node_groups": node_groups,
+        "group_colors": figure_spec.get("group_colors") or {},
+        "group_legend": bool(figure_spec.get("group_legend", True)),
+        "curved_reciprocal": bool(figure_spec.get("curved_reciprocal", True)),
+        "show_labels": bool(figure_spec.get("show_labels", True)),
+        "value_format": figure_spec.get("value_format", "auto"),
+    }
+
+
+def _build_graph(figure_spec: dict):
+    """Build the networkx graph + layout shared by every graph-shaped figure."""
     directed = bool(figure_spec.get("directed"))
 
     # Per-node label map (id -> LaTeX/text) and explicit positions, when the
@@ -618,13 +829,158 @@ def _render_graph(figure_spec: dict) -> None:
     else:
         pos = nx.spring_layout(G, seed=seed)
 
-    fig, ax = plt.subplots(figsize=(5, 4))
+    return G, pos, label_map
+
+
+def _render_graph(figure_spec: dict) -> None:
+    """Render a ``kind: graph`` figure spec (the default kind).
+
+    Both branches now forward their renderer's FULL parameter set, and both
+    validate their keys first: a key the selected renderer cannot consume RAISES
+    rather than vanishing (see ``_check_figure_keys``).
+
+    The undirected branch carries the Lesson-5 outcome layer (matched edges, node
+    values, outside options, pendant stubs), with bargaining values derived from
+    the compute helpers. The directed branch — new in 0.8.0 — carries node scores,
+    node highlighting, categorical grouping and reciprocal-edge arcs, with scores
+    and groups likewise derived rather than typed.
+    """
+    from .plot_style import draw_graph, draw_directed_graph, apply_ax_style
+
+    directed = bool(figure_spec.get("directed"))
     if directed:
-        # Directed causal-graph figures (e.g. the Shalizi-Thomas DAG): arrowheads
-        # + LaTeX label map + curated positions, matching the module-drawn DAG.
-        draw_directed_graph(G, ax, pos=pos, labels=label_map or None)
+        _check_figure_keys(
+            "graph", figure_spec, _GRAPH_KEYS_COMMON | _GRAPH_KEYS_DIRECTED,
+            "directed: true -> draw_directed_graph")
+    else:
+        _check_figure_keys(
+            "graph", figure_spec, _GRAPH_KEYS_COMMON | _GRAPH_KEYS_UNDIRECTED,
+            "draw_graph")
+
+    G, pos, label_map = _build_graph(figure_spec)
+
+    # A tall layout needs a tall canvas. Equal aspect fits the drawing inside the
+    # axes box, so a two-column graph forced into the default 5x4 is compressed
+    # until its node circles crowd and its labels have nowhere to go. Default
+    # unchanged, so every pre-0.8.0 figure keeps its exact canvas.
+    fig, ax = plt.subplots(figsize=tuple(figure_spec.get("figsize") or (5, 4)))
+    if directed:
+        draw_directed_graph(G, ax, pos=pos, labels=label_map or None,
+                            node_size=figure_spec.get("node_size"),
+                            **_resolve_directed_annotations(figure_spec, G))
     else:
         draw_graph(G, ax, pos=pos, **_resolve_graph_annotations(figure_spec, G))
+    apply_ax_style(ax)
+    plt.tight_layout()
+    display(fig)
+    plt.close(fig)
+
+
+def _render_matrix(figure_spec: dict) -> None:
+    """Render ``kind: matrix`` — the adjacency M, flow N, or scaled Ñ matrix.
+
+    Entries may be given explicitly (``values:``) but are normally COMPUTED from
+    the same graph the figure draws (``compute: adjacency | flow | scaled_flow``),
+    so the matrix and the picture cannot disagree.
+    """
+    from .link_analysis import adjacency_matrix, flow_matrix, scaled_flow_matrix
+    from .plot_style import draw_matrix, apply_ax_style
+
+    _check_figure_keys("matrix", figure_spec, _MATRIX_KEYS, "draw_matrix")
+
+    what = figure_spec.get("compute")
+    values = figure_spec.get("values")
+    row_labels = figure_spec.get("row_labels")
+    col_labels = figure_spec.get("col_labels")
+
+    if values is None:
+        if not what:
+            raise ValueError(
+                "figure kind 'matrix' needs either explicit 'values' or a "
+                "'compute' of 'adjacency', 'flow' or 'scaled_flow'.")
+        G, _, label_map = _build_graph(_require_directed("matrix", figure_spec))
+        order = list(G.nodes())
+        s = _fraction_or(figure_spec.get("s"), Fraction(4, 5))
+        if what == "adjacency":
+            values = adjacency_matrix(G, order)
+        elif what == "flow":
+            values = flow_matrix(G, order)
+        elif what == "scaled_flow":
+            values = scaled_flow_matrix(G, order, s)
+        else:
+            raise ValueError(
+                f"figure kind 'matrix': unknown compute {what!r}. Known: "
+                f"'adjacency', 'flow', 'scaled_flow'.")
+        labels = [label_map.get(n, n) for n in order]
+        row_labels = row_labels or labels
+        col_labels = col_labels or labels
+
+    n = len(values)
+    fig, ax = plt.subplots(figsize=(max(3.6, 1.0 + 0.62 * n),
+                                    max(2.6, 1.2 + 0.46 * n)))
+    draw_matrix(
+        ax, values,
+        row_labels=row_labels, col_labels=col_labels,
+        corner=figure_spec.get("corner"),
+        style=figure_spec.get("style", "matrix"),
+        highlight_cells=figure_spec.get("highlight_cells"),
+        highlight_rows=figure_spec.get("highlight_rows"),
+        title=figure_spec.get("title"), note=figure_spec.get("note"),
+        row_title=figure_spec.get("row_title"),
+        col_title=figure_spec.get("col_title"),
+        value_format=figure_spec.get("value_format", "auto"),
+    )
+    apply_ax_style(ax)
+    plt.tight_layout()
+    display(fig)
+    plt.close(fig)
+
+
+def _render_iteration_table(figure_spec: dict) -> None:
+    """Render ``kind: iteration_table`` — the k-step score table.
+
+    One row per update step, one column per node. The rows are COMPUTED by the
+    helpers, so the table cannot drift from the figure or the key.
+    """
+    from .link_analysis import hits_iterations, pagerank_iterations
+    from .plot_style import draw_matrix, apply_ax_style
+
+    _check_figure_keys("iteration_table", figure_spec, _ITERATION_TABLE_KEYS,
+                       "draw_matrix(style='table')")
+
+    G, _, label_map = _build_graph(_require_directed("iteration_table", figure_spec))
+    order = list(G.nodes())
+
+    what = figure_spec.get("compute", "pagerank")
+    steps = int(figure_spec.get("steps", 2))
+    rule = figure_spec.get("rule", "basic")
+    s = _fraction_or(figure_spec.get("s"), Fraction(4, 5))
+
+    if what == "pagerank":
+        seq = pagerank_iterations(G, steps, rule=rule, s=s)
+        rows = [[r[n] for n in order] for r in seq]
+    elif what in ("hits_authority", "hits_hub"):
+        key = "authority" if what == "hits_authority" else "hub"
+        seq = hits_iterations(G, steps)
+        rows = [[st[key][n] for n in order] for st in seq]
+    else:
+        raise ValueError(
+            f"figure kind 'iteration_table': unknown compute {what!r}. Known: "
+            f"'pagerank', 'hits_authority', 'hits_hub'.")
+
+    fig, ax = plt.subplots(figsize=(max(4.0, 0.95 + 0.72 * len(order)),
+                                    max(2.2, 1.1 + 0.44 * len(rows))))
+    draw_matrix(
+        ax, rows,
+        row_labels=[str(k) for k in range(len(rows))],
+        col_labels=[label_map.get(n, n) for n in order],
+        corner=figure_spec.get("corner", "step"),
+        style=figure_spec.get("style", "table"),
+        highlight_rows=figure_spec.get("highlight_rows"),
+        highlight_cells=figure_spec.get("highlight_cells"),
+        title=figure_spec.get("title"), note=figure_spec.get("note"),
+        value_format=figure_spec.get("value_format", "auto"),
+    )
     apply_ax_style(ax)
     plt.tight_layout()
     display(fig)
@@ -634,23 +990,31 @@ def _render_graph(figure_spec: dict) -> None:
 def _render_figure(ws, figure_spec: dict) -> None:
     """Render a YAML figure spec into the current Output context.
 
-    Supports ``kind: graph`` (inline or via ``ref:``) and ``kind: image`` (a
-    pre-rendered raster via ``path:``). Other kinds print a placeholder note.
+    Dispatches on ``kind`` (inline or via ``ref:``). Every kind validates its
+    keys before rendering — an unrecognized key RAISES rather than being silently
+    dropped (see ``_check_figure_keys``), and an unrecognized *kind* raises too.
+    A figure that can't be drawn as specified must say so; the one thing it must
+    never do is render something subtly different and stay quiet about it.
     """
     if "ref" in figure_spec:
         name = figure_spec["ref"]
-        figure_spec = ws.shared_figures.get(name)
-        if not figure_spec:
-            print(f"[engine] Missing shared figure: {name}")
-            return
+        resolved_spec = ws.shared_figures.get(name)
+        if not resolved_spec:
+            raise ValueError(
+                f"figure ref {name!r} resolves to nothing. Known shared figures: "
+                f"{', '.join(sorted(ws.shared_figures)) or '(none)'}.")
+        figure_spec = resolved_spec
 
     kind = figure_spec.get("kind", "graph")
     if kind == "image":
+        _check_figure_keys("image", figure_spec, _FIGURE_KEYS["image"], "imshow")
         path = figure_spec.get("path")
         resolved = _resolve_figure_path(ws, path) if path else None
         if resolved is None:
-            print(f"[engine] Figure image not found: {path!r}")
-            return
+            raise FileNotFoundError(
+                f"figure kind 'image': file not found: {path!r}. (A missing "
+                f"figure used to print a note and carry on, which shipped a "
+                f"worksheet with a hole in it.)")
         img = plt.imread(str(resolved))
         # Size the axes to the image aspect; equal aspect + axis off so the
         # raster is shown undistorted and unframed (no autoscale surprises).
@@ -664,16 +1028,31 @@ def _render_figure(ws, figure_spec: dict) -> None:
         plt.close(fig)
         return
     if kind == "payoff_matrix":
+        _check_figure_keys(kind, figure_spec, _FIGURE_KEYS[kind],
+                           "draw_payoff_matrix")
         _render_payoff_matrix(figure_spec)
         return
     if kind in _AUCTION_KINDS:
+        _check_figure_keys(kind, figure_spec, _FIGURE_KEYS[kind],
+                           f"draw_{kind}")
         _render_auction(figure_spec)
         return
     if kind == "bipartite_market":
+        _check_figure_keys(kind, figure_spec, _FIGURE_KEYS[kind],
+                           "draw_bipartite_market")
         _render_bipartite_market(figure_spec)
         return
-    if kind != "graph":
-        print(f"[engine] Figure kind {kind!r} not yet implemented.")
+    if kind == "matrix":
+        _render_matrix(figure_spec)
         return
+    if kind == "iteration_table":
+        _render_iteration_table(figure_spec)
+        return
+    if kind != "graph":
+        raise ValueError(
+            f"unknown figure kind {kind!r}. Known: 'graph', 'image', "
+            f"'payoff_matrix', 'bipartite_market', 'matrix', 'iteration_table', "
+            f"{', '.join(repr(k) for k in sorted(_AUCTION_KINDS))}. "
+            f"(This used to print a note and render nothing.)")
 
     _render_graph(figure_spec)
