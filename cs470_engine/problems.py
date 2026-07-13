@@ -457,6 +457,8 @@ def _render_bipartite_market(figure_spec: dict) -> None:
         derive=figure_spec.get("derive"),
         prices=figure_spec.get("prices"),
         valuations=figure_spec.get("valuations"),
+        price_label=figure_spec.get("price_label", "price"),
+        valuations_label=figure_spec.get("valuations_label", "valuations"),
         column_titles=figure_spec.get("column_titles", ("Sellers", "Buyers")),
         matching=figure_spec.get("matching"),
         constricted=figure_spec.get("constricted"),
@@ -646,10 +648,17 @@ _FIGURE_KEYS = {
     "revenue_curve":     frozenset({"kind", "ref", "curve", "seller_value",
                                     "n_max"}),
     "common_value_bids": frozenset({"kind", "ref", "common_value", "estimates"}),
+    # `note` and `edge_style` were FORWARDED by _render_bipartite_market from the
+    # day it shipped, but were never whitelisted — and _check_figure_keys runs
+    # FIRST. So `note:` on any bipartite figure RAISED, and the renderer's entire
+    # note branch was dead code, unreachable from YAML. Fixed in 0.9.0.
+    # `price_label` / `valuations_label` are 0.9.0's annotation-column captions.
     "bipartite_market":  frozenset({"kind", "ref", "left", "right", "edges",
                                     "valuations", "prices", "matching",
                                     "constricted", "open_nodes", "derive",
-                                    "reveal", "column_titles"}),
+                                    "reveal", "column_titles", "note",
+                                    "edge_style", "price_label",
+                                    "valuations_label"}),
     "matrix":            _MATRIX_KEYS,
     "iteration_table":   _ITERATION_TABLE_KEYS,
 }

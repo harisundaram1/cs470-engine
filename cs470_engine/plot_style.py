@@ -31,6 +31,7 @@ Aesthetic rules (enforced by scripts/validate.py)
 import itertools
 import math
 import re
+from collections.abc import Iterable
 from fractions import Fraction
 
 import matplotlib.lines as mlines
@@ -2975,20 +2976,56 @@ def optimal_assignment(valuations):
     """Maximum-total-valuation assignment of objects to agents (Section 10.2).
 
     ``valuations[i][j]`` is agent ``i``'s value for object ``j``. Returns the
-    injective assignment ``{agent_index: object_index}`` maximizing the summed
-    valuation — the social-welfare-maximizing ("optimal") matching. Brute-forced
-    over injective assignments: exact, and the worksheets' markets are small
-    (n <= 5). Ties break to the lexicographically-first arg-max (deterministic).
+    assignment ``{agent_index: object_index}`` maximizing the summed valuation —
+    the social-welfare-maximizing ("optimal") matching. It is a MATCHING: every
+    object goes to at most one agent and every agent gets at most one object.
+    Brute-forced over injective assignments: exact, and the worksheets' markets
+    are small (n <= 5). Ties break to the lexicographically-first arg-max
+    (deterministic).
+
+    RECTANGULAR MARKETS ARE LEGAL, and both orientations are handled:
+
+    - ``agents <= objects``: every agent gets a distinct object; spare objects go
+      unsold and simply do not appear as values.
+    - ``agents > objects``: every object goes to a distinct agent, and the
+      ``agents - objects`` agents who get nothing are **ABSENT FROM THE RETURNED
+      DICT** — an unassigned agent has no object, and a dict with no key for her
+      says exactly that. (Callers that need "did agent i get something?" should
+      ask ``i in assignment``.)
+
+    The second case is the canonical sponsored-search shape — more advertisers
+    than ad slots, which is E&K's Chapter 15 Exercise 1 verbatim — and through
+    0.8.1 it **SILENTLY RETURNED None**: the old brute force iterated
+    ``permutations(range(m), n)``, which is EMPTY when ``n > m``, leaving the
+    running best at its ``None`` initializer. Nothing raised. The None then
+    travelled to ``draw_bipartite_market``, which died on ``None.items()`` — an
+    AttributeError pointing at the renderer, three call frames from the actual
+    fault. A market with more buyers than items has a perfectly good optimal
+    assignment; refusing to compute it was the bug.
     """
     n = len(valuations)
     if n == 0:
         return {}
     m = len(valuations[0])
+    if m == 0:
+        return {}          # no objects: nobody is assigned anything
     best_total, best = None, None
-    for perm in itertools.permutations(range(m), n):
-        total = sum(valuations[i][perm[i]] for i in range(n))
-        if best_total is None or total > best_total:
-            best_total, best = total, {i: perm[i] for i in range(n)}
+    if n <= m:
+        # Unchanged from 0.8.1 — this path is what every live Lesson-4 figure
+        # takes, and it must stay bit-for-bit identical.
+        for perm in itertools.permutations(range(m), n):
+            total = sum(valuations[i][perm[i]] for i in range(n))
+            if best_total is None or total > best_total:
+                best_total, best = total, {i: perm[i] for i in range(n)}
+    else:
+        # More agents than objects: choose, for each object in turn, WHICH agent
+        # gets it. Equivalent to padding the market with zero-value fictitious
+        # objects and dropping them from the result — E&K's own device — but
+        # without inventing indices the caller never passed in.
+        for perm in itertools.permutations(range(n), m):
+            total = sum(valuations[perm[j]][j] for j in range(m))
+            if best_total is None or total > best_total:
+                best_total, best = total, {perm[j]: j for j in range(m)}
     return best
 
 
@@ -3069,9 +3106,31 @@ def ascending_auction_rounds(valuations):
     final, clearing round); ``matching`` is ``None`` until the clearing round,
     where it holds the market-clearing assignment. The potential strictly
     decreases until clearing.
+
+    REQUIRES at least as many sellers as buyers. With more buyers than sellers no
+    price vector can EVER clear — the set of all buyers is constricted no matter
+    what the prices are (its neighborhood is a subset of the sellers, so
+    ``|S| = buyers > sellers >= |N(S)|`` always), so Hall's condition fails
+    identically and the auction has nothing to converge to. Through 0.8.1 this
+    was not checked: the loop ran its defensive round-bound to exhaustion and
+    **SILENTLY RETURNED THE GARBAGE TRACE** — 69 rounds on a 3-buyer / 2-seller
+    market, every one of them un-cleared, with a final price vector that means
+    nothing. It now raises instead, and names the remedy, because a caller in
+    this position has a modelling error (Chapter 15's fix is to pad the market
+    with fictitious clickthrough-rate-0 slots — see ``sponsored_search_valuations``).
     """
     n = len(valuations)
     m = len(valuations[0]) if n else 0
+    if n > m:
+        raise ValueError(
+            f"ascending_auction_rounds: {n} buyers but only {m} sellers — no "
+            f"prices can ever clear this market (the set of all {n} buyers is "
+            f"constricted at every price vector, so Hall's condition fails "
+            f"identically). Pad the market to square with fictitious zero-value "
+            f"sellers first — e.g. sponsored_search_valuations(rates, values), "
+            f"which adds the clickthrough-rate-0 slots Chapter 15 uses for "
+            f"exactly this."
+        )
     prices = [0 for _ in range(m)]
     buyers = list(range(n))
     sellers = list(range(m))
@@ -3098,7 +3157,307 @@ def ascending_auction_rounds(valuations):
         low = min(prices) if prices else 0
         if low > 0:
             prices = [p - low for p in prices]
-    return rounds
+    # Unreachable: with sellers >= buyers the potential strictly decreases each
+    # round from a finite start, so the auction clears well inside the bound. If
+    # we ever land here the termination argument is broken — say so, loudly,
+    # rather than handing back a trace that never cleared and looks like one that
+    # did. (That silent hand-back IS the 0.8.1 bug this guard closes for good.)
+    raise RuntimeError(
+        f"ascending_auction_rounds: did not clear in {len(rounds)} rounds on a "
+        f"{n}-buyer x {m}-seller market. The potential must strictly decrease, "
+        f"so this should be impossible — the trace is NOT being returned, "
+        f"because an un-cleared trace is indistinguishable from a cleared one to "
+        f"a caller that only reads the last round's prices."
+    )
+
+
+# -----------------------------------------------------------------------------
+# Sponsored-search helpers (Lesson 7, c15)
+# -----------------------------------------------------------------------------
+#
+# Chapter 15 sells ad SLOTS to ADVERTISERS. Two numbers define the market:
+#
+#   * slot i has a CLICKTHROUGH RATE r_i — the clicks it gets per hour;
+#   * advertiser j has a REVENUE PER CLICK v_j — what a click is worth to it.
+#
+# and the whole chapter rests on one product: advertiser j's valuation for slot i
+# is v_ij = r_i * v_j (Section 15.2). That converts a sponsored-search market into
+# an ordinary Chapter-10 matching market, at which point Lesson 4's machinery
+# (optimal_assignment / preferred_seller_edges / is_market_clearing /
+# ascending_auction_rounds) applies unchanged.
+#
+# ⚠ ONE THING IS DELIBERATELY *NOT* SHARED WITH LESSON 4, AND IT IS THE POINT OF
+# THE LESSON. Section 15.9 PROVES that the VCG prices equal the MINIMUM
+# market-clearing prices — so it is tempting to compute VCG by running
+# `ascending_auction_rounds` and reading off the prices. DO NOT. That agreement is
+# a THEOREM ABOUT two constructions, not a definition of either. Sourcing VCG from
+# the auction would mean the student never meets the HARM RULE — which IS the
+# conceptual content of VCG — and would make the chapter's deepest result
+# unfalsifiable by construction: the two "different" computations would be the
+# same code, and would agree no matter what.
+#
+# So `vcg_prices` below derives the prices from Equation (15.1) ALONE, differencing
+# two welfare optima. That it lands on the same numbers as the ascending auction is
+# then something a worksheet can CHECK and SHOW (Fig 15.8: both give 40, 4, 0), not
+# something the engine assumed.
+
+
+def pad_sponsored_market(rates, values):
+    """Square the market with fictitious slots / advertisers (Section 15.2).
+
+    VCG needs a PERFECT matching, so it needs as many slots as advertisers. E&K's
+    device — stated outright in Exercise 6, where padding is step 1 of running the
+    mechanism — is to invent the missing side for free:
+
+    - more advertisers than slots -> add fictitious slots of CLICKTHROUGH RATE 0
+      (a slot nobody ever clicks; being assigned it is the same as getting
+      nothing, so it changes no incentive and no payoff);
+    - more slots than advertisers -> add fictitious advertisers of REVENUE PER
+      CLICK 0.
+
+    Returns ``(rates, values)`` as new padded lists, both of the same length. The
+    padding is a no-op on an already-square market.
+
+    The device is not bookkeeping — it is what makes "3 advertisers, 2 slots"
+    (Exercise 1) answerable at all, and forgetting it is the chapter's single most
+    diagnostic student error: it drops the *last* advertiser's competitive
+    pressure and understates every price above it.
+    """
+    rates, values = list(rates), list(values)
+    rates += [0] * max(0, len(values) - len(rates))
+    values += [0] * max(0, len(rates) - len(values))
+    return rates, values
+
+
+def sponsored_search_valuations(rates, values, pad=True):
+    """The conversion at the heart of Chapter 15: ``v_ij = r_i * v_j``.
+
+    ``rates[i]`` is slot ``i``'s clickthrough rate, ``values[j]`` advertiser
+    ``j``'s revenue per click. Returns the matching-market valuation matrix in the
+    engine's standing ``valuations[agent][object]`` orientation — so
+    ``valuations[j][i]`` is ADVERTISER j's valuation for SLOT i, and the matrix
+    drops straight into ``optimal_assignment``, ``is_market_clearing`` and
+    ``vcg_prices`` with no transposition.
+
+    ``pad=True`` (the default) squares the market first via
+    ``pad_sponsored_market``, which is what the mechanism actually requires. Pass
+    ``pad=False`` to get the raw rectangular matrix — worth doing exactly once per
+    course, to SHOW the student the market that cannot be matched before showing
+    the fictitious slot that fixes it.
+
+    E&K Figure 15.3(a): rates (10, 5, 2), values (3, 2, 1) ->
+    ``[[30, 15, 6], [20, 10, 4], [10, 5, 2]]``.
+    """
+    if pad:
+        rates, values = pad_sponsored_market(rates, values)
+    return [[r * v for r in rates] for v in values]
+
+
+def _welfare(valuations):
+    """Total valuation of the socially optimal assignment — E&K's ``V``.
+
+    ``V^S_B`` in the chapter's notation: the value of the socially optimal outcome
+    with the given sellers and buyers. Empty market -> 0.
+    """
+    assign = optimal_assignment(valuations)
+    return sum(valuations[a][o] for a, o in assign.items())
+
+
+def _drop(seq, index):
+    return [x for k, x in enumerate(seq) if k != index]
+
+
+def vcg_prices(valuations):
+    """VCG prices from the HARM RULE — Equation (15.1). Section 15.3.
+
+    ``valuations[j][i]`` is buyer ``j``'s valuation for item ``i``. The market is
+    padded to square with zero-valued items if it is not already (VCG assigns a
+    perfect matching, and E&K Exercise 6 makes the padding step 1 of the
+    mechanism).
+
+    THE RULE, and the only thing this function does::
+
+        p_ij  =  V^S_{B-j}  -  V^{S-i}_{B-j}                        (15.1)
+
+    Buyer ``j`` takes item ``i``. Ask what the OTHER buyers would have got if
+    ``j`` had never existed (``V^S_{B-j}`` — everyone else, all items available),
+    then ask what they actually get with ``j`` present and holding item ``i``
+    (``V^{S-i}_{B-j}`` — everyone else, item ``i`` gone). The difference is the
+    HARM ``j`` does to the rest of the world by showing up, and that harm is
+    exactly what ``j`` is charged. You do not pay for what you get; you pay for
+    what you COST everyone else.
+
+    Both terms are ordinary welfare optima on REDUCED markets, so this is a
+    self-contained derivation — it never consults prices, bids, or an auction.
+
+    Returns::
+
+        {"assignment": {buyer: item},
+         "prices":     {buyer: price},
+         "welfare":    V^S_B,              # total valuation of the assignment
+         "revenue":    sum of the prices,
+         "harm":       {buyer: {"item", "without_j", "with_j", "price"}}}
+
+    ``harm`` keeps the two welfare terms that produced each price, so a worksheet
+    can SHOW the subtraction rather than assert the answer — on E&K Fig 15.7 it
+    reads ``without_j=64, with_j=24 -> 40`` for advertiser x, which is the book's
+    own "36 + 4 = 40", reached by differencing the two optima instead of by
+    tracking who moves up a slot.
+    """
+    n = len(valuations)
+    if n == 0:
+        return {"assignment": {}, "prices": {}, "welfare": 0, "revenue": 0,
+                "harm": {}}
+    m = len(valuations[0])
+    # Square the market — VCG matches every buyer to an item (possibly a
+    # worthless one). A zero column is a fictitious item: valued 0 by everyone.
+    V = [list(row) + [0] * max(0, n - m) for row in valuations]
+
+    assign = optimal_assignment(V)
+    prices, harm = {}, {}
+    for j in range(n):
+        i = assign[j]
+        # V^S_{B-j}: the other buyers, with EVERY item still available.
+        without_j = _welfare(_drop(V, j))
+        # V^{S-i}_{B-j}: the other buyers, with item i taken off the table.
+        with_j = _welfare([_drop(row, i) for row in _drop(V, j)])
+        p = without_j - with_j
+        prices[j] = p
+        harm[j] = {"item": i, "without_j": without_j, "with_j": with_j,
+                   "price": p}
+    return {"assignment": assign, "prices": prices,
+            "welfare": sum(V[j][assign[j]] for j in range(n)),
+            "revenue": sum(prices.values()), "harm": harm}
+
+
+def _gsp_rank(bids):
+    """Advertisers ordered by bid, highest first. Ties break by index.
+
+    ⚠ A TIE MAKES THE GSP ALLOCATION AMBIGUOUS — the mechanism itself does not say
+    who wins, so any tie-break is a convention, not an answer. Index order is at
+    least deterministic. Do not pose a worksheet item on a tied bid profile.
+    """
+    return sorted(range(len(bids)), key=lambda j: (-bids[j], j))
+
+
+def gsp_outcome(rates, bids, values=None):
+    """The generalized second-price auction — allocation, prices, payoffs. §15.5.
+
+    E&K's rule, verbatim: slot ``i`` goes to the ``i``-th highest bidder, at a
+    price per click equal to the ``(i+1)``-st highest bid. Multiplying by the
+    slot's clickthrough rate, the CUMULATIVE price for slot ``i`` is
+    ``r_i * b_{i+1}`` — you pay the bid of the advertiser just below you, once per
+    click you receive.
+
+    ``rates`` must be listed in NON-INCREASING clickthrough order (slot 0 is the
+    top slot) — that is the chapter's convention and every figure's layout, and it
+    is what makes "the i-th slot" meaningful. A non-sorted ``rates`` RAISES rather
+    than silently ranking slots wrongly.
+
+    ``values`` (revenue per click, in advertiser order) is optional; supply it and
+    the payoffs come back too. Payoff of the advertiser in slot ``i`` is
+    ``r_i * (v_j - b_{i+1})`` — its valuation for the clicks it wins, minus what it
+    pays for them.
+
+    Returns ``{"assignment", "price_per_click", "price", "payoff", "revenue"}``,
+    all keyed by advertiser index. The lowest-ranked advertiser pays 0: there is no
+    bid below it (and after padding it sits in a clickthrough-rate-0 slot anyway).
+
+    E&K Fig 15.6 at truthful bids (rates 10/4/0, bids 7/6/1): x takes the top slot
+    at 6 per click -> pays 60, valuation 70, payoff 10.
+    """
+    rates, bids = list(rates), list(bids)
+    if any(rates[i] < rates[i + 1] for i in range(len(rates) - 1)):
+        raise ValueError(
+            f"gsp_outcome: rates {rates} are not in non-increasing order. GSP "
+            f"awards 'the i-th slot to the i-th highest bidder', which only means "
+            f"anything if slot 0 is the top slot. Sort the slots by clickthrough "
+            f"rate (descending) and reorder any figure labels to match."
+        )
+    n = len(bids)
+    # Square the market: fictitious rate-0 slots, or fictitious 0-bid advertisers.
+    rates = rates + [0] * max(0, n - len(rates))
+    bids = bids + [0] * max(0, len(rates) - n)
+    order = _gsp_rank(bids)
+
+    assignment, ppc, price, payoff = {}, {}, {}, {}
+    for slot, j in enumerate(order):
+        if j >= n:
+            continue                      # a fictitious advertiser wins nothing
+        # price per click = the (i+1)-st highest bid; 0 for the last bidder,
+        # who has nobody below to pay.
+        nxt = bids[order[slot + 1]] if slot + 1 < len(order) else 0
+        assignment[j] = slot
+        ppc[j] = nxt
+        price[j] = rates[slot] * nxt
+        if values is not None:
+            payoff[j] = rates[slot] * (values[j] - nxt)
+    return {"assignment": assignment, "price_per_click": ppc, "price": price,
+            "payoff": payoff if values is not None else None,
+            "revenue": sum(price.values())}
+
+
+def gsp_deviations(rates, bids, values):
+    """Every profitable unilateral bid deviation under GSP. Empty <=> equilibrium.
+
+    An advertiser cannot pick its price directly — it picks a BID, which picks a
+    SLOT, which picks the price. So the deviations worth checking are not "all
+    bids" (a continuum) but "all slots it could move to" (a handful). Holding the
+    others' bids ``c_1 >= c_2 >= ...`` fixed, advertiser ``j`` can land in slot
+    ``k`` by bidding into that rank, and it then pays the bid just below it, which
+    is ``c_k``. So its payoff in slot ``k`` is::
+
+        r_k * (v_j - c_k)
+
+    and the bid profile is a Nash equilibrium exactly when no advertiser prefers
+    any other slot to the one it is in (E&K §15.5's condition — "x doesn't want to
+    raise its bid above y's, and y doesn't want to lower its bid below x's").
+
+    Returns a list of ``{"advertiser", "from_slot", "to_slot", "current_payoff",
+    "deviation_payoff", "gain"}``, most profitable first — so a worksheet can show
+    the student the *specific* profitable lie, not merely assert that one exists.
+    On E&K Fig 15.6 at truthful bids (7, 6, 1) it returns exactly one: advertiser
+    x, slot 0 -> slot 1, payoff 10 -> 24, gain 14.
+    """
+    rates, bids, values = list(rates), list(bids), list(values)
+    n = len(bids)
+    rates = rates + [0] * max(0, n - len(rates))
+    cur = gsp_outcome(rates, bids, values)
+
+    devs = []
+    for j in range(n):
+        others = sorted((bids[k] for k in range(n) if k != j), reverse=True)
+        here = cur["assignment"][j]
+        cur_payoff = cur["payoff"][j]
+        for k in range(len(rates)):
+            if k == here:
+                continue
+            # Landing in slot k means paying the k-th highest of the OTHERS' bids
+            # (the advertiser immediately below you once you are in slot k).
+            c_k = others[k] if k < len(others) else 0
+            dev = rates[k] * (values[j] - c_k)
+            if dev > cur_payoff:
+                devs.append({"advertiser": j, "from_slot": here, "to_slot": k,
+                             "current_payoff": cur_payoff,
+                             "deviation_payoff": dev,
+                             "gain": dev - cur_payoff})
+    devs.sort(key=lambda d: (-d["gain"], d["advertiser"], d["to_slot"]))
+    return devs
+
+
+def is_gsp_equilibrium(rates, bids, values):
+    """Is this bid profile a Nash equilibrium of the GSP auction? §15.5.
+
+    True exactly when no advertiser has a profitable unilateral deviation — see
+    ``gsp_deviations``, which is the same computation and also says WHICH.
+
+    The headline result of the chapter is that this is FALSE at truthful bids: on
+    Fig 15.6, ``is_gsp_equilibrium((10, 4, 0), (7, 6, 1), (7, 6, 1))`` is False,
+    because x does better shading its bid to 5 and dropping to the second slot
+    (payoff 10 -> 24). Truth-telling is not an equilibrium of GSP — which is the
+    entire reason VCG exists.
+    """
+    return not gsp_deviations(rates, bids, values)
 
 
 # -----------------------------------------------------------------------------
@@ -3277,18 +3636,128 @@ BIPARTITE_STYLE = {
     "annot_fontsize":   11,
     "price_color":      COLORS["accent"],
     "note_fontsize":    10,
+    # Clearance (data units) an annotation column is pushed to when its header would
+    # otherwise OVERPRINT the bold column title above the node column — see
+    # _declash_annot_column, which applies it only on a measured collision. Not an
+    # invented number: 0.10 is the clearance Chapter 10's own figures already ship
+    # with (title "Buyers" measures 0.392 wide against the 0.50 column offset), so a
+    # de-clashed column lands at the spacing the live corpus already uses.
+    "title_clearance":  0.10,
 }
 
 
-def _bipartite_vector_label(vec):
-    """Plain-text ``[a, b, c]`` for a valuation vector — NO mathtext.
+def _bipartite_annot_label(v):
+    """Plain-text label for ONE annotation-column entry — scalar OR vector.
 
-    Deliberately unwrapped (no ``$…$``): these are bracketed integer vectors,
-    not math, so plain text loses nothing — and it makes the ``$$`` double-wrap
-    that crashes matplotlib's mathtext parser impossible by construction (a
-    string with no ``$`` cannot be re-wrapped into one). Uses ``_fmt_num_plain``
-    so a negative value renders a clean ``-3``, not ``_fmt_num``'s ``{-}3``."""
-    return "[" + ", ".join(_fmt_num_plain(v) for v in vec) + "]"
+    Deliberately unwrapped (no ``$…$``): these are numbers and bracketed integer
+    vectors, not math, so plain text loses nothing — and it makes the ``$$``
+    double-wrap that crashes matplotlib's mathtext parser impossible by
+    construction (a string with no ``$`` cannot be re-wrapped into one). Uses
+    ``_fmt_num_plain`` so a negative value renders a clean ``-3``, not
+    ``_fmt_num``'s ``{-}3``.
+
+    THREE entry shapes, because an annotation column is not always a vector:
+
+    - a **vector** ``[30, 15, 6]`` -> ``"[30, 15, 6]"`` (Ch.10's valuations);
+    - a **scalar** ``3`` -> ``"3"`` (Ch.15's clickthrough rate / revenue per
+      click — a slot's CTR is one number, not a vector, and through 0.8.1 a
+      scalar here raised ``TypeError: 'int' object is not iterable``);
+    - a **string** ``"10"`` -> ``"10"`` (a pre-formatted or symbolic label such
+      as ``"c_1"``). A string is iterable, so the pre-0.9.0 vector path walked it
+      CHARACTER BY CHARACTER and silently rendered ``"10"`` as ``"[1, 0]"``.
+      Strings are checked FIRST for exactly that reason.
+    """
+    if isinstance(v, str):
+        return v
+    if isinstance(v, Iterable):
+        return "[" + ", ".join(_fmt_num_plain(x) for x in v) + "]"
+    return _fmt_num_plain(v)
+
+
+#: Back-compat alias. The name said "vector" but the column is now scalar-or-
+#: vector; kept so any out-of-tree caller keeps working.
+_bipartite_vector_label = _bipartite_annot_label
+
+
+def _data_bbox(ax, artist):
+    """An artist's bounding box in DATA coordinates, or ``None``.
+
+    Data space, not pixels, on purpose: `tight_layout` runs AFTER this renderer and
+    rescales the axes, so a pixel box measured here is stale by the time the figure
+    is saved. Under the equal aspect this figure locks, that rescale is uniform — so
+    a box expressed in data units is invariant under it, and a comparison made here
+    still holds at save time.
+    """
+    try:
+        bb = artist.get_window_extent(ax.figure.canvas.get_renderer())
+    except Exception:
+        return None
+    inv = ax.transData.inverted()
+    (x0, y0), (x1, y1) = inv.transform((bb.x0, bb.y0)), inv.transform((bb.x1, bb.y1))
+    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
+
+
+def _declash_annot_column(ax, title, header, entries, side):
+    """Slide an annotation column sideways until its header clears the column title.
+
+    THE BUG THIS EXISTS FOR. The bold column title is CENTERED on its node column;
+    the annotation header sits a fixed 0.5–0.55 data units to the side of it. Those
+    offsets were tuned when the headers were the fixed words "price" and
+    "valuations" — but a header is a caption now, and Chapter 15's titles are wide
+    ("advertisers" is 1.54 data units against an offset of 0.5) while its headers are
+    TWO LINES ("revenues\\nper click"), which grow upward into the title's row. The
+    two then OVERPRINT: the figure rendered "advertisersrevenues".
+
+    No numeric gate can see that — every number on the figure is correct. The
+    byte-identity gate cannot see it either, because the figure is new and has no
+    baseline. It was found by looking at it, and it is pinned here.
+
+    ONLY A MULTI-LINE HEADER CAN REACH THE TITLE'S ROW, and that is why this is
+    gated on the line count rather than on the measured box alone.
+
+    The header is anchored BELOW the title (``va="bottom"`` at ``top + 0.5``, against
+    the title's ``top + 0.74``) and grows upward. One line of it reaches ~``top+0.75``
+    — level with the title's baseline, and no higher. That hairline is the layout
+    Chapter 10 has shipped for two releases across 71 figures at several axes sizes,
+    and it collides in none of them. A SECOND line reaches ~``top+1.0``, squarely
+    inside the title's band, and then a wide title overprints it. The line count is
+    the structural cause, so it is the condition.
+
+    It also has to be, because the measurement available here is not sharp enough to
+    stand alone. This code runs PRE-``tight_layout`` — text is sized in POINTS, so its
+    extent in DATA units depends on the axes size, which the layout pass has not
+    chosen yet. On Lesson 4's long titles ("Sellers (1 real + 2 fake)", 25 characters)
+    the pre-layout boxes graze by a fraction of a line height, the post-layout boxes do
+    not touch at all, and a bare overlap test therefore fires on four live figures that
+    are perfectly fine. Nor can this simply call ``tight_layout`` first and measure the
+    truth: ``tight_layout`` IS NOT IDEMPOTENT — running it here and again in the caller
+    drifts the layout and moves the entire live corpus.
+
+    So: gate on the line count (structural, scale-free, and byte-identical for Chapter
+    10 by construction — no shipped header contains a newline), then confirm with the
+    measured boxes, whose margin in the multi-line case is a full line height and far
+    too large for the pre-layout wobble to flip.
+
+    A pathological SINGLE-line header — very long, against a very wide title — is
+    therefore not de-clashed. Wrap it. That is what the chapter itself does, and
+    `scripts/audit_l7_figures.py` fails loudly if anyone forgets.
+    """
+    if header is None or title is None:
+        return 0.0
+    if "\n" not in header.get_text():
+        return 0.0
+    tb, hb = _data_bbox(ax, title), _data_bbox(ax, header)
+    if tb is None or hb is None:
+        return 0.0
+    # Axis-aligned overlap, in data units.
+    if not (tb[0] < hb[2] and hb[0] < tb[2] and tb[1] < hb[3] and hb[1] < tb[3]):
+        return 0.0
+    clear = BIPARTITE_STYLE["title_clearance"]
+    dx = (tb[2] - hb[0] + clear) if side > 0 else -(hb[2] - tb[0] + clear)
+    for t in [header] + list(entries):
+        x, y = t.get_position()
+        t.set_position((x + dx, y))
+    return dx
 
 
 def draw_bipartite_market(
@@ -3300,6 +3769,8 @@ def draw_bipartite_market(
     derive=None,
     prices=None,
     valuations=None,
+    price_label="price",
+    valuations_label="valuations",
     column_titles=("Sellers", "Buyers"),
     matching=None,
     constricted=None,
@@ -3332,15 +3803,40 @@ def draw_bipartite_market(
       ``prices``), RIGHT = buyers (aligned to ``valuations`` rows). With
       ``matching="auto"`` the market-clearing matching (if any) is overlaid bold.
 
-    Annotations align to node rows: ``prices`` is the outer-LEFT column (one per
-    left node), ``valuations`` the outer-RIGHT column (one vector per right
-    node). ``matching`` is an explicit list of ``(left_id, right_id)`` pairs to
+    THE TWO ANNOTATION COLUMNS ARE GENERAL, AND SYMMETRIC. ``prices`` is the
+    outer-LEFT column (one entry per left node), ``valuations`` the outer-RIGHT
+    column (one entry per right node). Each entry may be a SCALAR (``3``), a
+    VECTOR (``[30, 15, 6]``), or a pre-formatted STRING — and each column's header
+    is a caption you supply, via ``price_label`` / ``valuations_label``.
+
+    That generality is what the FOUR-COLUMN sponsored-search figure needs, and it
+    is the shape of E&K's foundational Figs 15.2 and 15.6 —
+    ``clickthrough rates | slots | advertisers | revenues per click``, with no
+    edges at all::
+
+        draw_bipartite_market(
+            ax, left=["a", "b", "c"], right=["x", "y", "z"],
+            prices=[10, 4, 0],       price_label="clickthrough\\nrates",
+            valuations=[7, 6, 1],    valuations_label="revenues\\nper click",
+            column_titles=("slots", "advertisers"))
+
+    The parameter NAMES are Chapter 10's (they are the columns' original job and
+    every live Lesson-4 figure calls them that), but the columns themselves carry
+    no pricing semantics — a clickthrough rate is not a price and a revenue per
+    click is not a valuation, which is exactly why the headers had to stop being
+    hardcoded. Through 0.8.1 they were the string literals ``"price"`` and
+    ``"valuations"``, and the right column ITERATED its argument, so a scalar
+    there raised ``TypeError: 'int' object is not iterable`` and the chapter's
+    defining figure could not be drawn at all. Headers default to the old literals,
+    so every Chapter-10 caller is unchanged.
+
+    ``matching`` is an explicit list of ``(left_id, right_id)`` pairs to
     bold, or ``"auto"`` to derive; ``constricted`` is an explicit ``(S, N(S))``
     pair of id-lists to highlight, or ``"auto"`` to derive via
     ``find_constricted_set``. ``open_nodes`` lists fictitious/empty nodes (drawn
     unfilled with a faint dashed border and dashed incident edges, e.g. the
-    Fig 10.7 auction panel). ``edge_style`` is a per-edge
-    ``{(l, r): "solid"|"dashed"}`` override.
+    Fig 10.7 auction panel, or Ch.15's clickthrough-rate-0 slot). ``edge_style``
+    is a per-edge ``{(l, r): "solid"|"dashed"}`` override.
 
     ``reveal`` is the answer-leak guard (analog of ``mask_winner_price``):
 
@@ -3544,33 +4040,48 @@ def draw_bipartite_market(
         _draw_node(nid, x, y, st["right_edge_color"], right_label_x, right_label_ha)
 
     # --- side columns (aligned to node rows) ------------------------------
+    price_entries, price_hdr = [], None
+    val_entries, val_hdr = [], None
     if prices is not None:
         for i in range(min(nL, len(prices))):
             _, y = pos_left[left[i]]
-            ax.text(price_x, y, _fmt_num_plain(prices[i]),
-                    ha="right", va="center", fontsize=st["annot_fontsize"],
-                    color=st["price_color"], zorder=4)
-        ax.text(price_x, top + 0.5, "price", ha="right", va="bottom",
-                fontsize=st["annot_fontsize"], color=st["price_color"],
-                style="italic", zorder=4)
+            price_entries.append(ax.text(
+                price_x, y, _bipartite_annot_label(prices[i]),
+                ha="right", va="center", fontsize=st["annot_fontsize"],
+                color=st["price_color"], zorder=4))
+        if price_label:
+            price_hdr = ax.text(price_x, top + 0.5, str(price_label), ha="right",
+                                va="bottom", multialignment="center",
+                                fontsize=st["annot_fontsize"],
+                                color=st["price_color"], style="italic", zorder=4)
     if valuations is not None:
         for j in range(min(nR, len(valuations))):
             _, y = pos_right[right[j]]
-            ax.text(val_x, y, _bipartite_vector_label(valuations[j]),
-                    ha="left", va="center", fontsize=st["annot_fontsize"],
-                    color=COLORS["text"], zorder=4)
-        ax.text(val_x, top + 0.5, "valuations", ha="left", va="bottom",
-                fontsize=st["annot_fontsize"], color=COLORS["text"],
-                style="italic", zorder=4)
+            val_entries.append(ax.text(
+                val_x, y, _bipartite_annot_label(valuations[j]),
+                ha="left", va="center", fontsize=st["annot_fontsize"],
+                color=COLORS["text"], zorder=4))
+        if valuations_label:
+            val_hdr = ax.text(val_x, top + 0.5, str(valuations_label), ha="left",
+                              va="bottom", multialignment="center",
+                              fontsize=st["annot_fontsize"], color=COLORS["text"],
+                              style="italic", zorder=4)
 
     # --- column titles + note --------------------------------------------
     lt, rt = column_titles
-    ax.text(x_left, top + 0.74, str(lt), ha="center", va="bottom",
-            fontsize=st["title_fontsize"], fontweight="bold",
-            color=COLORS["primary"], zorder=4)
-    ax.text(x_right, top + 0.74, str(rt), ha="center", va="bottom",
-            fontsize=st["title_fontsize"], fontweight="bold",
-            color=COLORS["primary"], zorder=4)
+    lt_t = ax.text(x_left, top + 0.74, str(lt), ha="center", va="bottom",
+                   fontsize=st["title_fontsize"], fontweight="bold",
+                   color=COLORS["primary"], zorder=4)
+    rt_t = ax.text(x_right, top + 0.74, str(rt), ha="center", va="bottom",
+                   fontsize=st["title_fontsize"], fontweight="bold",
+                   color=COLORS["primary"], zorder=4)
+
+    # A wide title + a tall (multi-line) header overprint each other. Measured, and
+    # a no-op unless the boxes really touch — so Chapter 10 does not move. See
+    # _declash_annot_column.
+    _declash_annot_column(ax, lt_t, price_hdr, price_entries, side=-1)
+    _declash_annot_column(ax, rt_t, val_hdr, val_entries, side=+1)
+
     if note:
         ax.text((x_left + x_right) / 2.0, bot - 0.7, str(note),
                 ha="center", va="top", fontsize=st["note_fontsize"],

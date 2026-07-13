@@ -16,6 +16,146 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [0.9.0] — 2026-07-12 — sponsored search (Ch.15): the four-column figure, VCG/GSP, and three latent bugs. **NOT tagged, NOT deployed**
+
+The renderer-first gate for Lesson 7. Chapter 15's foundational figure could not be
+drawn at all, VCG and GSP did not exist, and three bugs in shipped code were waiting
+for the first rectangular market to walk into them.
+
+### Added — renderer
+
+- **The two annotation columns are now GENERAL, and symmetric.** Each entry may be a
+  SCALAR, a VECTOR, or a pre-formatted string, and each column's header is a caption
+  you pass (`price_label=`, `valuations_label=`). This is what unlocks E&K's Fig 15.2
+  / 15.6 — `clickthrough rates | slots | advertisers | revenues per click`, four
+  columns and no edges — and all five of the worksheet's `bi-partite*.pdf` figures,
+  which are that same shape. Through 0.8.1 the right column ITERATED its argument (a
+  scalar raised `TypeError: 'int' object is not iterable`) and both headers were the
+  hardcoded literals `"price"` and `"valuations"` — so even a 1-vector workaround
+  would have captioned a clickthrough rate as a *price*, on the one figure whose whole
+  point is that it is not one. Defaults are the old literals, so every Chapter-10
+  caller is untouched.
+- **`_declash_annot_column`** — a wide column title and a two-line header OVERPRINT
+  each other ("advertisers" is 1.54 data units against the 0.5 the header sits at, and
+  a second header line grows up into the title's row). The figure rendered
+  `advertisersrevenues`. **No numeric gate can see this** — every number on the figure
+  is correct — **and the byte-identity gate cannot see it either**, because the figure
+  is new and has no baseline. It was found by LOOKING at the figure, which is the only
+  thing that finds this class.
+
+### Added — compute (Chapter 15, derived from the chapter)
+
+- **`sponsored_search_valuations(rates, values)`** — `v_ij = r_i * v_j`, the conversion
+  the whole chapter rests on, plus **`pad_sponsored_market`**, the fictitious
+  clickthrough-rate-0 slot that squares the market (E&K Exercise 6 makes the padding
+  step 1 of the mechanism, not bookkeeping).
+- **`vcg_prices(valuations)`** — the **HARM RULE**, Equation (15.1):
+  `p_ij = V^S_{B-j} - V^{S-i}_{B-j}`. Returns the prices, the assignment, the revenue,
+  and — deliberately — the **two welfare terms behind each price**, so a worksheet can
+  SHOW the subtraction instead of asserting the answer.
+- **`gsp_outcome`**, **`gsp_deviations`**, **`is_gsp_equilibrium`** — the generalized
+  second-price auction: slot *i* to the *i*-th highest bidder at the *(i+1)*-st highest
+  bid, cumulative `r_i * b_{i+1}`. `gsp_deviations` names the *specific* profitable lie
+  rather than merely reporting that one exists.
+
+> ⚠️ **VCG IS NOT SOURCED FROM THE ASCENDING AUCTION, AND MUST NEVER BE.** §15.9 proves
+> the VCG prices ARE the minimum market-clearing prices, so it is tempting to compute
+> them by running `ascending_auction_rounds` and reading the prices off. That agreement
+> is a **THEOREM ABOUT TWO CONSTRUCTIONS, NOT A DEFINITION OF EITHER**. Sourcing VCG
+> that way teaches the wrong derivation even when the number lands right — the student
+> never meets the harm rule, which *is* the conceptual content of VCG — and it makes
+> the chapter's deepest result unfalsifiable by construction, since the two "different"
+> computations would be the same code and would agree no matter what. `vcg_prices`
+> differences two welfare optima and never looks at a price;
+> `test_vcg_agrees_with_the_ascending_auction` then compares two genuinely independent
+> computations, which is the only reason that comparison carries information.
+
+### Fixed — three latent bugs in shipped code, independent of Lesson 7
+
+- **B1. `optimal_assignment` SILENTLY RETURNED `None` when agents > objects** — the
+  canonical sponsored-search shape, and E&K Exercise 1 verbatim (3 advertisers, 2
+  slots). It brute-forced `permutations(range(m), n)`, which is EMPTY when `n > m`, so
+  the running best never left its `None` initializer. Nothing raised. The `None` then
+  travelled to `draw_bipartite_market` and died on `None.items()` — an `AttributeError`
+  blamed on the renderer, three frames from the fault. It now computes the answer,
+  which exists: every object goes to a distinct agent, and the agents who get nothing
+  are absent from the returned dict.
+- **B2. `ascending_auction_rounds` returned a 69-round trace that never cleared** — on
+  the same market. With more buyers than sellers the set of ALL buyers is constricted
+  at every price vector, so no prices can EVER clear; the loop ran its defensive
+  round-bound to exhaustion and handed back a meaningless final price vector,
+  indistinguishable to any caller reading `rounds[-1]["prices"]` from a trace that
+  cleared. It now raises, and names the remedy.
+- **B3. `_bipartite_vector_label` mangled scalars and strings** — `TypeError` on `3`;
+  and `"10"` was walked character-by-character and rendered as **`[1, 0]`**. The second
+  is the worse one: it did not raise, it drew a wrong number onto a figure.
+- **`note` and `edge_style` were forwarded by the bipartite dispatch but never
+  whitelisted**, and `_check_figure_keys` runs first — so `note:` on any bipartite
+  figure RAISED, and the renderer's entire note branch was dead code, unreachable from
+  YAML since the day it shipped.
+
+### Not changed — and proven so
+
+- **Render regression: 858/858 figures BYTE-IDENTICAL** to 0.8.1 across all 13
+  worksheet YAMLs, both seams (dispatch + concept cells). Baseline rendered from a real
+  0.8.1 checkout with `cs470_engine.plot_style.__file__` **asserted** to resolve inside
+  it before a single figure was drawn — `PYTHONPATH` does not shadow an editable
+  install, and a baseline that silently imports the working tree compares 0.9.0 to
+  itself. Run **unpinned** (`PYTHONHASHSEED=random`), twice per engine; both self-diffs
+  clean.
+- **The de-clash is gated on the header containing a NEWLINE**, which is what makes the
+  above true *by construction*: every header in the live corpus is a single word, so the
+  gate cannot open on them. An earlier version of this change tested the measured boxes
+  alone and **moved 71 live figures** — the measurement runs pre-`tight_layout`, where
+  text extents in data units are not yet final, and it grazed on Lesson 4's long titles
+  ("Sellers (1 real + 2 fake)"). `tight_layout` is **not idempotent**, so the renderer
+  cannot simply call it and measure the truth. `test_R1_declash_never_fires_on_a_single_line_header`
+  pins this.
+
+### 🧨 FINDINGS — the load-bearing ones. Read these before touching Ch.15 or the bipartite renderer.
+
+**1. VCG comes from the HARM RULE. It must NEVER be sourced from the ascending auction.**
+E&K §15.9 *proves* the VCG prices equal the minimum market-clearing prices, so it is
+tempting to compute them by running `ascending_auction_rounds` and reading the prices
+off. **That coincidence is a THEOREM ABOUT TWO CONSTRUCTIONS, NOT A COMPUTATION OF
+EITHER.** Sourcing VCG that way teaches the WRONG DERIVATION even when the number lands
+right — the student never meets the harm rule, which *is* the conceptual content of VCG —
+and it makes the chapter's deepest result **unfalsifiable by construction**: the two
+"different" computations would be the same code, and would agree no matter what.
+`vcg_prices` differences two welfare optima (Eq. 15.1) and never consults a price, a bid,
+or an auction. The agreement is therefore a **TEST**
+(`test_vcg_agrees_with_the_ascending_auction`, six markets — on Fig 15.8 both give
+40, 4, 0), and it is available to a concept cell as a result to *show*, not an assumption
+that was smuggled in.
+
+**2. GSP does NOT dominate VCG on revenue.** E&K's own example: GSP yields **48** at one
+equilibrium and **34** at another, with VCG at **44** *in between*. So `34 < 44` — and the
+source worksheet's concluding claim that GSP revenue always beats VCG is **unconditionally
+false**. Pinned by `test_the_revenue_race_GSP_DOES_NOT_DOMINATE_VCG`, which asserts
+`not (lo >= vcg)` so the claim cannot creep back in.
+
+**3. ⚠️ FALSE PREMISE — "a long header would be silently CLIPPED." IT IS NOT.**
+matplotlib `Text` has **`clip_on=False`** by default, and the save path uses
+**`bbox_inches="tight"`** — so text overflowing the axes still DRAWS, and the saved PNG
+simply grows to include it. This is not theoretical: **0.8.1's `"price"` header already
+spills outside the axes on every Lesson-4 figure**, and those figures are fine. A fix
+premised on clipping — sizing the frame to fit the caption — **moved 71 live figures and
+was reverted.** The real defect was never clipping; it was two texts OVERPRINTING each
+other. Recording it because it is an intuitive, wrong premise that will otherwise be
+re-adopted by the next person who sees a caption hanging off the axes.
+
+**4. ⚠️ `tight_layout` IS NOT IDEMPOTENT.** Calling it twice on the same unchanged figure
+produces a **different PNG each time** (verified: three calls, three hashes). So a renderer
+CANNOT call `tight_layout` internally in order to measure true post-layout text extents —
+doing so drifts the layout and moves the entire live corpus. This is the reason the
+title/header de-clash is gated **structurally** (on a newline in the header, the actual
+cause: the header is anchored *below* the title and only a second line can rise into its
+row) rather than on a measurement. The engine's standing caveat — *collision detection runs
+pre-`tight_layout`, so it is an APPROXIMATION* — has this as its sharp edge: you cannot
+simply fix it by measuring later.
+
+---
+
 ## [0.8.1] — 2026-07-12 — `initial=` on the HITS iteration, **NOT tagged, NOT deployed**
 
 A one-parameter fix, and the parameter is the whole point of a concept cell.
