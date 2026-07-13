@@ -16,6 +16,186 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [0.10.1] — 2026-07-13 — the schematic's ink-vs-data pass, and a warning that must not ship
+
+Polish on 0.10.0's `bowtie_schematic` / `stack`. **NOT tagged, NOT deployed.**
+
+### Fixed — a UserWarning was rendering ABOVE the student's figure
+
+- **`kind: stack` emitted `UserWarning: This figure includes Axes that are not compatible
+  with tight_layout`.** The figure was fine; the warning was not — it draws as a red box
+  above the figure, and a course that trains students to ignore warnings has taught them
+  the wrong habit.
+- **It had nothing to do with the equal-aspect axes.** The cause is
+  `gridspec_kw={"hspace": ...}`: that marks the GridSpec as having locally-modified
+  subplot params, and matplotlib's `get_subplotspec_list` then returns `None` for those
+  Axes, which is exactly the condition the warning reports. Verified both ways — a plain
+  two-row `subplots` with equal-aspect children does not warn, and the same call *with*
+  `gridspec_kw` warns even with no aspect set. The panel gap is now requested through
+  `tight_layout(h_pad=...)`, which leaves the GridSpec alone. **Scoped fix, no
+  warning-suppression anywhere.**
+
+### Fixed — the fringe blob was DATA-sized and its label was INK-sized
+
+- **🧨 THE FOURTH INK-VS-DATA BASIS ERROR IN THIS ENGINE**, after `pendant_stub` (pre-0.7.0),
+  the collision search's binding dimension (0.8.0) and the reciprocal arc's bow (0.10.0).
+  A fringe blob was an `Ellipse` with radii in DATA units holding a label in POINTS. A
+  label's width in data units is (its point width) / (points per data unit), which moves
+  with the panel — so the two bases never tracked. Measured across the three panels this
+  schematic actually ships in, "DISCONNECTED" spanned **2.48 / 2.11 / 1.88 data units**
+  against a fixed **1.90**-unit oval: it **overflowed in two contexts and just fitted in the
+  third**.
+- **The blob is now sized in POINTS, from its own text**, positioned at a data coordinate
+  (`_points_ellipse`), with the width solved from the ellipse-contains-a-box condition so
+  the label is enclosed **by construction, not by taste**. The text extent is read with
+  `_text_extent_pts`, which depends only on font + string + size and is therefore invariant
+  under panel size, figure size **and `tight_layout`** — which matters, because a text's box
+  in DATA units is **not** invariant under `tight_layout` (measured: 2.506 → 2.086 data
+  units, a 17% shrink).
+  ⚠️ **That refutes `_data_bbox`'s docstring**, which claims a data-space box survives the
+  rescale. It does for an artist defined in data units; it does **not** for text. Flagged,
+  not changed — `_declash_annot_column` is gated structurally and does not depend on it.
+- **The brief's diagnosis was inverted, and the measurement is why we know.** The font size
+  was *already* points-based and identical (11pt / 9pt) in every context; making it "more
+  points-based" would have fixed nothing. The offender was the container.
+
+### Fixed — three text defects in `draw_bowtie_schematic`
+
+- **`IN` / `OUT` are centred.** They sat outboard of their flow arrows (mirror-symmetric, but
+  reading as off-centre in both lobes). They now sit at the lobe's **centroid** in x
+  (a third of the way from the base), lifted clear of the arrow along y=0. One rule, both
+  lobes.
+- **Labels are drawn in INK-BLACK, not in their role's colour. LEGIBILITY BEATS SEMANTIC
+  MUTING.** `DISCONNECTED`'s role colour is the muted-grey token, so it was pale grey text on
+  a pale grey blob; `IN` was a washed-out sky blue. The roles are still colour-coded — by the
+  region's **fill and outline**, which is what has to match the role-coloured graph. The label
+  was encoding something the fill already said.
+- A **dimmed** label (when another role is highlighted) now sits at alpha 0.78, not 0.45. The
+  focusing is done by the region (whose fill drops to 0.10); the label only steps back.
+
+### Changed — the schematic is the same SIZE in both places it appears
+
+Its labels are ink and are identical at any panel size, but its **lobes are data** and scale
+with the panel. So 6.1's concept cell (8.6 × 9.4, ratios 0.90/1.0) and `bowtie_over_web16`
+(schematic panel figsize `[8.6, 3.7]`) are tuned to give the schematic a panel of **4.92in and
+4.95in** — a 0.6% match. Without that, a student meets the same schematic at two different
+sizes.
+
+### FINDINGS
+
+- **The deployed corpus is untouched: 681/681 byte-identical** vs the 0.9.0 baseline, with
+  `plot_style.__file__` asserted against the baseline checkout, unpinned, twice per engine,
+  self-diffs identical. All 120 moved figures are in 6.1 / 6.2 (undeployed).
+- **Engine 0.9.0 cannot render 6.1 any more** — it raises on `kind: bowtie_schematic` and
+  `kind: stack`. That is the fail-loudly dispatch working, and it means the baseline
+  comparison has to be scoped to the deployed corpus, which is the corpus the gate is for.
+
+---
+
+## [0.10.0] — 2026-07-13 — the reciprocal-edge fix, the bow-tie schematic, stacked figures. **NOT tagged, NOT deployed**
+
+Lesson 6's renderer pass. One shipped bug that made a figure state the opposite of its
+caption, and two capabilities the L6 walkthrough proved were missing.
+
+### Fixed — reciprocal edges were drawn as ONE curve, not two
+
+- **🧨 A reciprocal pair's two arcs were SUPERIMPOSED. There was never a second code
+  path.** The walkthrough reported 6.2's F⇄G rendering as an unreadable blob in the leak
+  concept cell and as a single **double-headed arrow** in q_15, and reasonably inferred
+  two renderers. There is one: both figures emit two single-headed `FancyArrowPatch`es
+  through `draw_directed_graph` → `_reciprocal_rad`, with **identical** parameters. The
+  two appearances are the same defect at two axes scales.
+
+  `arc3` places its control point at `mid + rad * (dy, -dx)` with `d = end - start`.
+  **Reversing an edge already flips `d`, and therefore already flips the perpendicular.**
+  `_reciprocal_rad` negated `rad` on top of that — which flips it *back*. Both halves got
+  the same control point and were drawn as **the same curve**:
+
+      F->G, rad=+0.18  ->  control (2.25, -0.27)
+      G->F, rad=-0.18  ->  control (2.25, -0.27)     <- identical
+
+  The docstring's stated intent ("each half bows the opposite way") was right; the code
+  did the exact opposite. The sign is now **constant** — each direction bows to the side
+  its own travel direction picks, which is just as iteration-order-independent.
+
+  This is not cosmetic. A double-headed arrow reads as **undirected adjacency**, the one
+  notion Chapter 14 teaches students to abandon, and it destroys the leak cell's claim:
+  the mechanism *is* that F and G point only at each other, and the picture has to show
+  two arrows.
+
+- **The bow is now a fixed length in POINTS (`reciprocal_edge_offset`, 10pt).** `arc3`'s
+  `rad` is a fraction of the CHORD, so even with correct signs a fixed rad bows a short
+  edge by a tiny absolute amount: F⇄G's 1.5-unit chord (~56pt) separated by ~10pt against
+  a 16pt node radius. **This is the same data-unit basis bug as `pendant_stub` before
+  0.7.0** (29.6× spread → 1.0×). The rad is now solved for per edge from the axes scale,
+  so long edges bow gently and short ones bow more — the separation is what stays
+  constant, because separation is what legibility depends on.
+
+### Added — two new figure kinds
+
+- **`bowtie_schematic` — a NEW FIGURE CLASS: regions and flows, not nodes and edges.**
+  The engine had nothing that could draw it; every renderer here drew a node-link
+  diagram, a table, or a curve. Draws the IN lobe, SCC core, OUT lobe, a tendril off IN,
+  a mirror tendril off OUT, a tube bypassing the core, and a disconnected fragment — a
+  qualitative recreation of Broder / E&K §13.6, **not** a port of the raster.
+  `highlight=` brings one role forward so a single authored figure serves several
+  questions.
+
+  This partially reverses the blueprint's "colour a real graph by role instead" call.
+  That was right not to port and right that the role-coloured graph is good — but the
+  schematic is not redundant, because the two teach different things: the schematic
+  **orients** (here is the shape of the web, here is where the fringes live); the
+  role-coloured graph **mechanizes** (roles are computed from edges; one link moves a
+  page between them). Colours come from the existing `BOWTIE_COLORS`, so a role means one
+  colour across both figures.
+
+  Regions are `Ellipse`/`Polygon`, never `Circle` — deliberately. `edge_audit` reads a
+  circle as a NODE, and would otherwise confidently audit the flows of a figure that has
+  no graph in it.
+
+- **`stack` — two or more figures stacked vertically as one figure**, plus
+  `plot_style.stacked_axes()` for the concept seam. Needed in two independent places
+  (6.1's q_15 wants the schematic above the university network; 6.2's random-walk cell
+  wants the 8-page graph above the walk table, which currently asks a student to imagine
+  a walker on a network it never shows). **Neither seam could express it**: a section's
+  `figure:` is one spec and every renderer called `plt.subplots` itself, while
+  `concept.py` hands a render function exactly one axes. `_render_graph` is now split
+  into `_draw_graph_into(ax, spec)` + a wrapper — the byte-identical corpus proves the
+  split moved nothing.
+
+  **Panel heights are DERIVED, not declared.** Every figure here locks equal aspect, and
+  `frame_signed_axes` chooses its limits to fit the axes box it is GIVEN — so the box's
+  shape is an *input* to the drawing. Hand-guessed ratios produce two correct drawings
+  separated by a third of a page of white space that `tight_layout` cannot reclaim,
+  because the space is inside the axes. Each child's own `figsize:` is its statement of
+  shape, and the stack sizes itself from those before drawing.
+
+### Fixed — a test that ENCODED the bug
+
+- `test_only_reciprocal_edges_curve` asserted that the two halves of a pair take
+  **opposite-signed** rads. That is precisely the defect. The sign of an internal number
+  was never the property worth testing; where the two arcs END UP is. Replaced, and the
+  geometric property is now pinned against the rendered path in the redesign repo's
+  `test_edge_audit.py`.
+
+### FINDINGS
+
+- **The render-regression gate is scoped exactly.** 915 figures, unpinned, twice per
+  engine; both engines self-diff identical (so the determinism is real, not a pinned
+  seed). **The deployed L1–L5 corpus is byte-identical — 0 of 685 figures moved.** All 34
+  diffs are in 6.2, and they are one-to-one with the figures that contain a 2-cycle
+  (`pr8_leak`'s F⇄G, `pr3`'s A⇄B, and the two concept cells that draw them). Every 6.2
+  figure *without* a reciprocal pair is unchanged; 6.1 and 7.1 are untouched, and 6.1 has
+  no 2-cycle anywhere, which is why.
+- **⚠️ The gates cannot see any of this, and both bugs found by eyeballing.** The
+  coincident-arc bug passed every numeric test for two releases. The bow-tie schematic's
+  TUBE was drawn bowing straight THROUGH the SCC core — labelled TUBE, meaning "bypasses
+  the core" — on the first cut, with the `arc3` rad sign backwards *again*. No gate can
+  see either. **`arc3`'s sign convention has now produced three separate bugs in this
+  engine. Compute the control point before trusting it.**
+
+---
+
 ## [0.9.0] — 2026-07-12 — sponsored search (Ch.15): the four-column figure, VCG/GSP, and three latent bugs. **NOT tagged, NOT deployed**
 
 The renderer-first gate for Lesson 7. Chapter 15's foundational figure could not be

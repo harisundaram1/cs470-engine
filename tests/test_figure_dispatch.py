@@ -241,12 +241,27 @@ def test_bowtie_roles_have_semantic_colors():
 
 def test_only_reciprocal_edges_curve():
     """A 2-cycle drawn straight superimposes two arrows on one segment. Every other
-    edge must stay DEAD straight — that is what keeps pre-0.8.0 figures identical."""
+    edge must stay DEAD straight — that is what keeps pre-0.8.0 figures identical.
+
+    🧨 THIS TEST USED TO ASSERT THE BUG. It required `_reciprocal_rad(A, B)` and
+    `_reciprocal_rad(B, A)` to have OPPOSITE SIGNS, on the reasoning that opposite signs
+    mean opposite bows. They do not, and that is precisely the 0.10.0 defect: `arc3`
+    offsets its control point by `rad * (dy, -dx)`, and reversing the edge ALREADY flips
+    `d`. Negating `rad` as well flips it back, so both halves landed on the SAME control
+    point and were drawn as ONE curve — F<->G came out as an unreadable blob in the leak
+    cell and as a single double-headed arrow in q_15.
+
+    The sign of an internal number was never the property worth testing. What matters is
+    where the two arcs END UP, which is a fact about the drawing — so that is what
+    `test_a_RECIPROCAL_PAIR_IS_DRAWN_AS_TWO_SEPARATED_ARCS` (in the redesign repo's
+    `test_edge_audit.py`) now measures, off the rendered path. Here we keep only the
+    claims that are still true of the rad itself.
+    """
     G = nx.DiGraph([("A", "B"), ("B", "A"), ("B", "C")])
-    check_true("A->B bows one way", _reciprocal_rad(G, "A", "B") > 0)
-    check_true("B->A bows the other", _reciprocal_rad(G, "B", "A") < 0)
-    check("the two halves are opposite",
-          _reciprocal_rad(G, "A", "B"), -_reciprocal_rad(G, "B", "A"))
+    check_true("a reciprocal edge bows", _reciprocal_rad(G, "A", "B") != 0.0)
+    check("both halves take the SAME rad — the perpendicular flips with the edge, and "
+          "negating rad on top of that would cancel it out and superimpose them",
+          _reciprocal_rad(G, "A", "B"), _reciprocal_rad(G, "B", "A"))
     check("a one-way edge stays straight", _reciprocal_rad(G, "B", "C"), 0.0)
 
 

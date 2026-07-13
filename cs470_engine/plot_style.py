@@ -233,7 +233,28 @@ GRAPH_STYLE = {
     # on ONE segment and reads as a single edge; bowing the halves apart in
     # opposite directions is what makes F⇄G and A⇄B legible as MUTUAL links.
     # 0.0 (dead straight) for every non-reciprocal edge, so nothing else moves.
-    "reciprocal_edge_rad":     0.18,
+    #
+    # 🧨 THE BOW IS A FIXED LENGTH IN POINTS. `reciprocal_edge_rad` IS THE FALLBACK
+    # ONLY. matplotlib's `arc3` rad is a FRACTION OF THE CHORD, so a fixed rad bows a
+    # short edge by a tiny absolute amount and a long edge by a huge one — the SAME
+    # data-unit basis bug that made `pendant_stub` vary 29.6x across the corpus before
+    # 0.7.0 put it on a points basis. On 6.2's F⇄G the chord is 1.5 data units (~56pt),
+    # so rad=0.18 separated the two arcs by 0.18*1.5 = 0.27 data units ~ 10pt — against
+    # a node radius of 16pt and an arrowhead ~6pt wide. The two arcs merged: in the
+    # concept cell into an unreadable blob with no arrowheads at all, and in the q_15
+    # figure into what reads unmistakably as a SINGLE DOUBLE-HEADED ARROW. Both are the
+    # same defect at two axes scales — there was never a second code path.
+    #
+    # A double-headed arrow is not a cosmetic problem in this lesson. It reads as
+    # UNDIRECTED ADJACENCY, which is exactly the notion Chapter 14 teaches students to
+    # abandon, and it destroys the leak cell's whole claim: the mechanism IS that F and
+    # G point only at each other, and the picture has to SHOW two arrows.
+    #
+    # So the offset is specified where legibility actually lives — in points, against
+    # the node radius and the arrowhead — and the rad is solved for per edge.
+    "reciprocal_edge_offset":  10.0,   # points, perpendicular, PER ARC (20pt apart)
+    "reciprocal_edge_rad":     0.18,   # fallback when the axes scale is unknowable
+    "reciprocal_edge_max_rad": 0.55,   # a very short chord must not balloon
 }
 
 #: Bow-tie role -> color. Semantic, not arbitrary: the SCC core takes the accent
@@ -246,6 +267,53 @@ BOWTIE_COLORS = {
     "TENDRIL":      COLORS["quaternary"],   # caramel   — hanging off a lobe
     "TUBE":         COLORS["highlight"],    # Arches    — IN -> OUT, bypassing
     "DISCONNECTED": COLORS["minor_tick"],   # grey      — off the bow-tie
+}
+
+#: The bow-tie SCHEMATIC's geometry — the qualitative Broder / E&K §13.6 picture.
+#:
+#: These are shape constants, not data: the schematic does not plot a graph, it draws
+#: the SHAPE OF THE WEB. Every number is a position in the drawing's own data space
+#: (equal aspect), collected here rather than buried in the renderer so the picture can
+#: be re-proportioned without touching the drawing code.
+BOWTIE_SCHEMATIC = {
+    # --- STRUCTURE: DATA units. These define the picture's SHAPE, and they scale with
+    # the panel — which is what you want for a drawing: a bigger panel is a bigger
+    # bow-tie, not the same bow-tie with more white space around it.
+    "core_radius":     1.15,
+    "lobe_span":       4.0,      # how far IN / OUT reach from the core
+    "lobe_half_h":     1.75,     # half-height of a lobe's outer edge
+    "tendril_in":      (-3.40, 3.05),
+    "tendril_out":     (3.40, -3.05),
+    "disconnected":    (2.95, 3.05),
+    "tube_dip":        -2.45,    # how far below the core the tube bypasses it
+
+    # --- INK: POINTS. Everything that must stay the SAME SIZE whatever the panel.
+    #
+    # 🧨 THE FRINGE BLOB IS SIZED IN POINTS, FROM ITS OWN TEXT — AND THAT IS THE WHOLE
+    # POINT. It used to be an ellipse with radii in DATA units holding a label in
+    # POINTS, and those two bases do not track each other: the label's width in data
+    # units is (its point width) / (points per data unit), which moves with the panel.
+    # Measured across the three panels this schematic actually ships in, the word
+    # "DISCONNECTED" spanned 2.48, 2.11 and 1.88 data units against a fixed 1.90-unit
+    # oval — so it OVERFLOWED its blob in two contexts and just fitted in the third.
+    #
+    # This is the ink-vs-data basis error that has now bitten this engine four times
+    # (`pendant_stub`, the collision search's binding dimension, the reciprocal arc's
+    # bow, and this). The rule that keeps falling out of it: **if two things must hold a
+    # fixed relationship to each other, they must be measured in the same basis.** A
+    # label is ink, so its container is ink. The blob is therefore drawn in POINTS,
+    # positioned at a DATA coordinate, and sized from the text's own point extent —
+    # which is a pure function of the font and the string, and is therefore invariant
+    # under panel size, figure size AND `tight_layout` (which rescales the axes and is
+    # not idempotent, so nothing measured in data space survives it anyway).
+    "fringe_pad":        1.18,   # blob width / text width, as a ratio (both in points)
+    "fringe_min_h":       26.0,  # points — a blob is a lozenge, not a hairline ellipse
+    "region_alpha":    0.28,     # region fill; the outline carries the identity
+    "dim_alpha":       0.10,     # a region NOT being highlighted
+    "region_lw":       1.8,      # points
+    "flow_width":      2.2,      # points
+    "label_size":      11,       # points
+    "fringe_label_size": 9,      # points
 }
 
 #: Fallback palette for non-bow-tie groupings (e.g. "which SCC is this node in?"),
@@ -669,7 +737,7 @@ def _draw_grouped_nodes(G, pos, ax, nodelist, node_size, node_groups,
         _draw_group_legend(ax, palette)
 
 
-def _reciprocal_rad(G, u, v):
+def _reciprocal_rad(G, u, v, ax=None, pos=None):
     """Arc curvature for edge (u, v) — nonzero only for a RECIPROCAL pair.
 
     A 2-cycle drawn as two straight edges puts both arrows on the SAME line
@@ -679,16 +747,70 @@ def _reciprocal_rad(G, u, v):
     non-convergence insights, that ambiguity would land on the two most important
     pictures in the lesson.
 
-    Bowing the two halves apart in opposite directions separates them. The sign
-    is keyed to a stable comparison of the endpoints, so each half of a pair bows
-    the opposite way and the rendering does not depend on edge iteration order.
     Non-reciprocal edges get 0.0 and stay dead straight — which is every edge of
     every figure drawn before 0.8.0.
+
+    🧨 THE SIGN IS CONSTANT, AND FLIPPING IT IS THE BUG THIS FUNCTION SHIPPED WITH.
+    ------------------------------------------------------------------------------
+    This used to return ``+rad`` for one direction of a pair and ``-rad`` for the other,
+    "so that each half bows the opposite way". That is the right INTENT and the exact
+    opposite of what the code did, because it double-counts the reversal.
+
+    ``arc3`` builds its control point as ``mid + rad * (dy, -dx)`` with ``d = end -
+    start``. Reversing an edge already flips ``d``, and therefore already flips the
+    perpendicular. Negating ``rad`` on top of that flips it BACK — so both halves of a
+    reciprocal pair got the SAME control point and were drawn as THE SAME CURVE, one on
+    top of the other. They never bowed apart at all, at any rad:
+
+        F->G, rad=+0.18  ->  control (2.25, -0.27)
+        G->F, rad=-0.18  ->  control (2.25, -0.27)   <- identical
+
+    That is what the "unreadable blob" in 6.2's leak cell and the "single double-headed
+    arrow" in its q_15 figure BOTH are: two coincident one-headed arrows pointing
+    opposite ways, which is precisely the ambiguity this function was written to
+    prevent. There was never a second code path — one bug, two axes scales.
+
+    A CONSTANT sign is what actually separates them, and it is just as
+    iteration-order-independent: each direction bows to the side its own travel
+    direction picks, which is a property of the edge, not of when it was drawn.
+
+    🧨 AND THE CURVATURE IS SOLVED FOR, NOT DECLARED — see `reciprocal_edge_offset`.
+    `arc3`'s ``rad`` is a fraction of the CHORD, so declaring it fixes the bow as a
+    proportion of edge length and lets the ACTUAL separation — the only thing that
+    decides whether a reader sees two arrows or one blob — float with the layout. On a
+    short chord it collapses. So the caller passes the axes and the layout, this asks
+    for a separation in POINTS, and it returns the rad that delivers it:
+
+        deviation_pts = rad * chord_pts / 2   (arc3's Bezier control offset)
+        =>  rad = 2 * offset_pts / chord_pts
+
+    The rad is clamped, because as the chord shrinks the required rad grows without
+    bound and a near-zero-length pair would balloon into a circle.
+
+    ⚠ The scale is read PRE-`tight_layout`, like every other measurement in this module
+    (`_data_per_point` and the whole collision search do the same). It is therefore an
+    APPROXIMATION, and it must stay one: `tight_layout` is NOT idempotent, and calling
+    it inside a renderer to get true extents drifts the layout and moves the corpus. A
+    few points of drift in a 20pt separation is invisible; that is why this is safe here
+    and a collision threshold is not.
+
+    Falls back to the declared `reciprocal_edge_rad` when there is no axes to measure
+    against, so the function keeps working outside a live render.
     """
     if not G.has_edge(v, u) or u == v:
         return 0.0
-    rad = GRAPH_STYLE["reciprocal_edge_rad"]
-    return rad if str(u) < str(v) else -rad
+
+    dpp = _data_per_point(ax) if ax is not None else None
+    if not dpp or pos is None or u not in pos or v not in pos:
+        return GRAPH_STYLE["reciprocal_edge_rad"]
+
+    (x0, y0), (x1, y1) = pos[u], pos[v]
+    chord_pts = math.hypot(x1 - x0, y1 - y0) / dpp
+    if chord_pts <= 0:
+        return GRAPH_STYLE["reciprocal_edge_rad"]
+
+    rad = 2.0 * GRAPH_STYLE["reciprocal_edge_offset"] / chord_pts
+    return min(rad, GRAPH_STYLE["reciprocal_edge_max_rad"])
 
 
 def draw_directed_graph(G, ax, *, pos, labels=None, node_size=None,
@@ -757,7 +879,9 @@ def draw_directed_graph(G, ax, *, pos, labels=None, node_size=None,
 
     for u, v in G.edges():
         is_hl = (u, v) in highlight
-        rad = _reciprocal_rad(G, u, v) if curved_reciprocal else 0.0
+        # `frame_signed_axes` above has already set the limits and locked equal aspect,
+        # so the axes scale is knowable here and the bow can be solved for in points.
+        rad = _reciprocal_rad(G, u, v, ax, pos) if curved_reciprocal else 0.0
         nx.draw_networkx_edges(
             G, pos, edgelist=[(u, v)], ax=ax,
             edge_color=hl_color if is_hl else GRAPH_STYLE["edge_color"],
@@ -3684,9 +3808,33 @@ def _data_bbox(ax, artist):
 
     Data space, not pixels, on purpose: `tight_layout` runs AFTER this renderer and
     rescales the axes, so a pixel box measured here is stale by the time the figure
-    is saved. Under the equal aspect this figure locks, that rescale is uniform — so
-    a box expressed in data units is invariant under it, and a comparison made here
-    still holds at save time.
+    is saved.
+
+    🧨 BUT A DATA-SPACE BOX IS **NOT** INVARIANT UNDER `tight_layout` WHEN THE ARTIST IS
+    TEXT — AND THIS DOCSTRING USED TO CLAIM IT WAS.
+
+    The old claim was: "under the equal aspect this figure locks, that rescale is uniform,
+    so a box expressed in data units is invariant under it." That is true of an artist
+    whose geometry is DEFINED in data units (a node circle, an edge) — it rescales with
+    the axes, so its data box does not move. It is **false of text**, whose size is fixed
+    in POINTS: when `tight_layout` grows the axes box, the same string covers FEWER data
+    units. Measured, on this module's own schematic: one label spanned
+
+        2.506 data units BEFORE tight_layout   ->   2.086 AFTER   (a 17% shrink)
+
+    So a data-space text box measured here is a PRE-LAYOUT APPROXIMATION, exactly like the
+    annotation collision search, and for exactly the same reason. It cannot be used to size
+    a data-space container around a label and have the enclosure survive the layout pass —
+    which is precisely the bug that shipped in 0.10.0's bow-tie schematic, where a blob
+    with radii in data units held a label in points and overflowed it in two of the three
+    panels the figure ships in. The fix there was to put BOTH sides in the same basis
+    (`_points_ellipse` + `_text_extent_pts`), which is the general rule.
+
+    The comparison this function is actually used for (`_declash_annot_column`) is gated
+    STRUCTURALLY — on the header containing a newline — and does not depend on the
+    invariance the old docstring asserted. It is left as it is; the claim is what was
+    wrong, not the code. A wrong claim in a docstring is a refuted premise that the next
+    reader will re-adopt, so it is corrected here rather than quietly deleted.
     """
     try:
         bb = artist.get_window_extent(ax.figure.canvas.get_renderer())
@@ -4096,6 +4244,289 @@ def draw_bipartite_market(
 # -----------------------------------------------------------------------------
 # Annotation helper for missing/forbidden edges
 # -----------------------------------------------------------------------------
+
+def draw_bowtie_schematic(ax, *, highlight=None, show_fringes=True,
+                          labels=True, title=None):
+    """The bow-tie SCHEMATIC — IN lobe, SCC core, OUT lobe, and the three fringes.
+
+    A NEW FIGURE CLASS, and the engine had nothing that could draw it. Every other
+    renderer here draws a NODE-LINK diagram (circles joined by edges), a table, or a
+    curve. This draws REGIONS AND FLOWS: it has no nodes, no edges, and no data — it is
+    a picture of a SHAPE.
+
+    WHY IT EXISTS, GIVEN THE ROLE-COLORED GRAPH ALREADY DOES
+    --------------------------------------------------------
+    The blueprint decided not to port E&K's raster and to color a REAL graph by role
+    instead. That was right about not porting, and right that the role-colored graph is
+    good — and wrong that it made the schematic redundant. **They teach different
+    things, and Lesson 6 needs both:**
+
+      * the SCHEMATIC **orients**: here is the shape of the web, here is where the
+        fringes live. It is a map. Nothing about it is computed.
+      * the role-colored graph **mechanizes**: roles are COMPUTED from edges, and
+        adding one link moves a page between them. It is a machine.
+
+    A student who has only the machine cannot see the shape; a student who has only the
+    map thinks the roles are decoration. The bow-tie concept cell's own prose names
+    "TENDRIL / TUBE / DISCONNECTED — the fringes" while its figure's legend shows only
+    IN / SCC / OUT — so that bullet currently has NO REFERENT ON SCREEN. This is the
+    referent.
+
+    Colors come from ``BOWTIE_COLORS``, the SAME map the role-colored graph uses, so a
+    role means one color across both figures. That is the whole point of drawing them in
+    one system: the orange blob here is the orange nodes there.
+
+    ⚠ NOT A NODE-LINK DIAGRAM — and the audit gates are told so. The regions are drawn as
+    ``Ellipse`` and ``Polygon``, never ``Circle``, because ``edge_audit`` reads a circle
+    as a NODE and would try to audit this figure's flows as edges running through nodes.
+    They are not: they are arrows through regions. The kind is classified non-node-link
+    in the gate, and the shapes reflect that too.
+
+    highlight : str, optional
+        A role to bring forward ("TENDRIL", "TUBE", ...). Everything else dims. This is
+        what lets one authored figure serve "which page is a tendril?" and "tendril vs
+        tube" without four hand-drawn variants.
+    show_fringes : bool
+        Draw TENDRIL / TUBE / DISCONNECTED. False gives the bare three-part bow-tie.
+    """
+    from matplotlib.patches import Ellipse, Polygon
+
+    S = BOWTIE_SCHEMATIC
+    R, span, half_h = S["core_radius"], S["lobe_span"], S["lobe_half_h"]
+
+    def alpha_for(role):
+        if highlight is None:
+            return S["region_alpha"]
+        return S["region_alpha"] if role == highlight else S["dim_alpha"]
+
+    def lw_for(role):
+        return S["region_lw"] * (1.6 if role == highlight else 1.0)
+
+    def region(patch, role):
+        patch.set_facecolor(BOWTIE_COLORS[role])
+        patch.set_alpha(alpha_for(role))
+        patch.set_edgecolor(BOWTIE_COLORS[role])
+        patch.set_linewidth(lw_for(role))
+        ax.add_patch(patch)
+
+    # --- the bow tie itself: two lobes tucked behind a core ----------------------
+    # The lobes are triangles whose apex sits AT the core's centre and is hidden
+    # behind it (the core is drawn last, on top). That tuck is what makes the three
+    # regions read as one connected shape rather than three shapes in a row.
+    region(Polygon([(-span, half_h), (-span, -half_h), (0.0, 0.0)], closed=True), "IN")
+    region(Polygon([(span, half_h), (span, -half_h), (0.0, 0.0)], closed=True), "OUT")
+
+    # --- the fringes -------------------------------------------------------------
+    #
+    # Each fringe blob is a POINTS-sized lozenge fitted to its own label. `blob()` sizes
+    # it so the text is enclosed with room to spare, whatever the panel — see the note on
+    # `fringe_pad` in BOWTIE_SCHEMATIC. It returns the blob's half-height in points, which
+    # is what the incoming flow arrow shrinks back by, so the arrow stops at the rim
+    # instead of at a data-space guess that drifts.
+    def blob(xy, text, role):
+        tw, th = _text_extent_pts(ax, text, S["fringe_label_size"], weight="bold")
+        h = max(math.sqrt(2.0) * th, S["fringe_min_h"])
+        # An ellipse contains a w x h box iff (w/W)^2 + (h/H)^2 <= 1. Solve for W, then
+        # add the pad. This is why the label is enclosed by CONSTRUCTION, not by taste.
+        w = S["fringe_pad"] * tw / math.sqrt(max(1.0 - (th / h) ** 2, 0.05))
+        e = _points_ellipse(ax, xy, w, h)
+        e.set_facecolor(BOWTIE_COLORS[role])
+        e.set_alpha(alpha_for(role))
+        e.set_edgecolor(BOWTIE_COLORS[role])
+        e.set_linewidth(lw_for(role))
+        return h / 2.0
+
+    if show_fringes:
+        # A TENDRIL off IN: reachable FROM in, reaches neither the core nor OUT. The
+        # arrow points AWAY from the lobe — a dead end you can get to.
+        tx, ty = S["tendril_in"]
+        r_in = blob((tx, ty), "TENDRIL", "TENDRIL")
+        _flow(ax, (-2.75, half_h * 0.62), (tx + 0.30, ty),
+              BOWTIE_COLORS["TENDRIL"], highlight == "TENDRIL", rad=-0.15,
+              shrinkB=r_in + 2.0)
+
+        # A TENDRIL off OUT: reaches OUT, reachable from neither the core nor IN. The
+        # arrow points INTO the lobe — the mirror case, and the one students invert.
+        ox, oy = S["tendril_out"]
+        r_out = blob((ox, oy), "TENDRIL", "TENDRIL")
+        _flow(ax, (ox - 0.30, oy), (2.75, -half_h * 0.62),
+              BOWTIE_COLORS["TENDRIL"], highlight == "TENDRIL", rad=-0.15,
+              shrinkA=r_out + 2.0)
+
+        # A TUBE: IN straight to OUT, BYPASSING the core. Drawn as a flow that dives
+        # UNDER the core, because "bypassing" is the entire content of the word — a tube
+        # that crosses the core is not a tube, it is a path through the SCC, which is
+        # the one thing a tube is defined not to be. (The first cut of this had the rad
+        # sign backwards and drew exactly that: an arc straight through the core,
+        # labelled TUBE. No gate can see it; it was found by looking.)
+        _flow(ax, (-span * 0.58, -half_h * 0.40), (span * 0.58, -half_h * 0.40),
+              BOWTIE_COLORS["TUBE"], highlight == "TUBE", rad=0.62)
+
+        # DISCONNECTED: touches nothing. No arrow — that IS the definition.
+        blob(S["disconnected"], "DISCONNECTED", "DISCONNECTED")
+
+    # --- the core, on top, and the flow THROUGH it --------------------------------
+    region(Ellipse((0.0, 0.0), 2 * R, 2 * R), "SCC")
+    _flow(ax, (-span * 0.60, 0.0), (-R * 1.05, 0.0), BOWTIE_COLORS["IN"],
+          highlight == "IN")
+    _flow(ax, (R * 1.05, 0.0), (span * 0.60, 0.0), BOWTIE_COLORS["OUT"],
+          highlight == "OUT")
+
+    if labels:
+        # ⚠️ THE LABEL IS DRAWN IN INK-BLACK, NOT IN ITS ROLE'S COLOUR. LEGIBILITY BEATS
+        # SEMANTIC MUTING. The roles ARE colour-coded — by the region's fill and outline,
+        # which is what has to match the role-coloured graph — but colouring the TEXT the
+        # same way made "DISCONNECTED" pale grey on pale grey (its role colour is the
+        # engine's muted-grey token) and "IN" a washed-out sky blue. A label a student
+        # cannot read teaches nothing, and the muting was encoding something the fill
+        # already said.
+        def lab(x, y, text, role, size=None):
+            ax.text(x, y, text, ha="center", va="center",
+                    fontsize=size or S["label_size"],
+                    color=COLORS["text"], weight="bold", zorder=6,
+                    # A dimmed label must still be READABLE. The focusing is done by the
+                    # REGION (whose fill drops to `dim_alpha` = 0.10); the label only
+                    # steps back. Dropping the text to 0.45 put us straight back in the
+                    # "unreadably faint" hole this fix exists to climb out of.
+                    alpha=1.0 if (highlight is None or role == highlight) else 0.78)
+
+        # IN and OUT sit at their lobe's CENTROID in x (a triangle's centroid is a third
+        # of the way from its base), lifted clear of the flow arrow that runs along y=0.
+        # One rule, applied to both — they used to sit outboard of their arrows, which is
+        # mirror-symmetric but reads as "not centred" in either lobe.
+        lab(-span * 2.0 / 3.0, half_h * 0.45, "IN", "IN")
+        lab(0.0, 0.0, "SCC", "SCC")
+        lab(span * 2.0 / 3.0, half_h * 0.45, "OUT", "OUT")
+        if show_fringes:
+            lab(*S["tendril_in"], "TENDRIL", "TENDRIL", S["fringe_label_size"])
+            lab(*S["tendril_out"], "TENDRIL", "TENDRIL", S["fringe_label_size"])
+            lab(0.0, S["tube_dip"] + 0.10, "TUBE", "TUBE", S["fringe_label_size"])
+            lab(*S["disconnected"], "DISCONNECTED", "DISCONNECTED",
+                S["fringe_label_size"])
+
+    if title:
+        ax.set_title(title, fontsize=GRAPH_STYLE["label_font_size"],
+                     color=COLORS["text"])
+
+    ax.set_aspect("equal")
+    ax.set_axis_off()
+    pad = 0.75
+    ax.set_xlim(-span - pad, span + pad)
+    ax.set_ylim(S["tube_dip"] - 1.15, max(S["tendril_in"][1],
+                                          S["disconnected"][1]) + 1.15)
+    return ax
+
+
+def _renderer(fig):
+    """A renderer to measure text with, without drawing the figure.
+
+    `canvas.get_renderer()` exists on Agg (which is what every gate and every save path
+    in this project uses); `Figure._get_renderer()` is matplotlib's own fallback for the
+    backends that do not have it. If neither is available we would be reduced to guessing
+    a text's width from its character count, which is exactly the kind of estimate this
+    module keeps getting burned by — so we do not guess, we raise.
+    """
+    canvas = fig.canvas
+    if hasattr(canvas, "get_renderer"):
+        return canvas.get_renderer()
+    from matplotlib.backend_bases import _get_renderer
+    return _get_renderer(fig)
+
+
+def _text_extent_pts(ax, s, size, weight=None):
+    """A string's rendered size in POINTS — width, height.
+
+    Invariant under everything that matters: it depends only on the font, the string and
+    the point size, so it is the same before and after `tight_layout`, on a 4-inch panel
+    and on a 9-inch one. That is precisely why the blob that has to contain it is sized
+    from this number and not from anything measured in data space.
+    """
+    probe = ax.text(0, 0, s, fontsize=size, weight=weight, alpha=0.0)
+    try:
+        bb = probe.get_window_extent(_renderer(ax.figure))
+    finally:
+        probe.remove()
+    ppp = ax.figure.dpi / 72.0
+    return bb.width / ppp, bb.height / ppp
+
+
+def _points_ellipse(ax, xy, w_pts, h_pts, **kw):
+    """An ellipse SIZED IN POINTS, POSITIONED at a DATA coordinate.
+
+    The standard matplotlib idiom for "this is ink, but it lives there": build the shape
+    in a points-scaled frame and translate that frame to the data point's display
+    position. The shape is then immune to the axes scale — which is the entire reason it
+    can be trusted to contain a label whose size is also fixed in points.
+    """
+    from matplotlib.patches import Ellipse
+    from matplotlib.transforms import Affine2D, ScaledTranslation
+    tr = (Affine2D().scale(ax.figure.dpi / 72.0)
+          + ScaledTranslation(xy[0], xy[1], ax.transData))
+    e = Ellipse((0, 0), w_pts, h_pts, transform=tr, **kw)
+    ax.add_patch(e)
+    return e
+
+
+def _flow(ax, p0, p1, color, is_highlighted, rad=0.0, shrinkA=0.0, shrinkB=0.0):
+    """One flow arrow of the schematic. Not an edge — a movement between REGIONS."""
+    from matplotlib.patches import FancyArrowPatch
+    S = BOWTIE_SCHEMATIC
+    ax.add_patch(FancyArrowPatch(
+        p0, p1, arrowstyle="-|>", mutation_scale=15,
+        linewidth=S["flow_width"] * (1.5 if is_highlighted else 1.0),
+        color=color, alpha=1.0 if is_highlighted else 0.75,
+        connectionstyle=f"arc3,rad={rad}", zorder=5,
+        # The shrink is in POINTS, which is what lets a flow stop cleanly at the rim of
+        # a blob whose size is also in points. The arrow aims at the blob's CENTRE and is
+        # pulled back by its half-height; aiming at a computed rim point would put the
+        # arrow's geometry back in data space, where it would drift with the panel.
+        shrinkA=shrinkA, shrinkB=shrinkB,
+    ))
+
+
+def stacked_axes(ax, ratios=(1.0, 1.0), hspace=0.18):
+    """Split ONE axes into two STACKED axes occupying the same footprint.
+
+    THE SMALLEST THING THAT SERVES BOTH SEAMS. Two independent places in Lesson 6 need a
+    figure ABOVE a figure, so this is a recurring capability rather than a one-off:
+
+      * 6.1's q_15 wants the bow-tie schematic above the 16-node university network —
+        the question asks "which page is a tendril?" and the word has no picture;
+      * 6.2's random-walk cell wants the 8-page graph above the walk-vs-PageRank table.
+        The cell currently asks a student to imagine a walker following out-links on a
+        network IT NEVER SHOWS, and hands them an 8-column table with no visible cause.
+
+    Neither seam could express it. A question figure's spec is ONE `kind` and every
+    renderer calls `plt.subplots` itself; a concept cell is handed exactly ONE axes by
+    `concept.py`. This solves the second directly (a render function calls it on the axes
+    it was given) and the first via the `stack` figure kind, which is built on it.
+
+    STACKED, not side-by-side, and that is not a style preference: the university network
+    is already cramped horizontally and the walk table is 8 columns wide. Side-by-side
+    crushes both.
+
+    The original axes is REMOVED and two new ones take its place in the same gridspec
+    slot, so the caller's figure keeps its size and `tight_layout` still governs.
+    Returns (top, bottom).
+    """
+    fig = ax.figure
+    spec = ax.get_subplotspec()
+    if spec is None:                       # a bare add_axes: fall back on its box
+        box = ax.get_position()
+        ax.remove()
+        h = box.height * (1 - hspace)
+        tot = float(ratios[0] + ratios[1])
+        h_top = h * ratios[0] / tot
+        h_bot = h * ratios[1] / tot
+        top = fig.add_axes([box.x0, box.y0 + h_bot + box.height * hspace,
+                            box.width, h_top])
+        bot = fig.add_axes([box.x0, box.y0, box.width, h_bot])
+        return top, bot
+
+    gs = spec.subgridspec(2, 1, height_ratios=list(ratios), hspace=hspace)
+    ax.remove()
+    return fig.add_subplot(gs[0]), fig.add_subplot(gs[1])
+
 
 def draw_missing_edge(ax, pos, u, v, *, color=None, alpha=None):
     """Draw a dotted orange line between two nodes to mark a "missing" edge.

@@ -661,6 +661,15 @@ _FIGURE_KEYS = {
                                     "valuations_label"}),
     "matrix":            _MATRIX_KEYS,
     "iteration_table":   _ITERATION_TABLE_KEYS,
+    # The bow-tie SCHEMATIC — regions and flows, not nodes and edges. It draws the
+    # SHAPE of the web (IN / SCC / OUT and the three fringes) and takes no graph at
+    # all: there is nothing to compute, which is exactly what distinguishes it from
+    # the role-colored graph that sits beside it.
+    "bowtie_schematic":  frozenset({"kind", "ref", "highlight", "show_fringes",
+                                    "labels", "title", "figsize"}),
+    # Two or more figures, stacked vertically, as ONE figure.
+    "stack":             frozenset({"kind", "ref", "figures", "ratios", "width",
+                                    "panel_height", "hspace"}),
 }
 
 
@@ -854,6 +863,28 @@ def _render_graph(figure_spec: dict) -> None:
     node highlighting, categorical grouping and reciprocal-edge arcs, with scores
     and groups likewise derived rather than typed.
     """
+    # A tall layout needs a tall canvas. Equal aspect fits the drawing inside the
+    # axes box, so a two-column graph forced into the default 5x4 is compressed
+    # until its node circles crowd and its labels have nowhere to go. Default
+    # unchanged, so every pre-0.8.0 figure keeps its exact canvas.
+    fig, ax = plt.subplots(figsize=tuple(figure_spec.get("figsize") or (5, 4)))
+    _draw_graph_into(ax, figure_spec)
+    plt.tight_layout()
+    display(fig)
+    plt.close(fig)
+
+
+def _draw_graph_into(ax, figure_spec: dict) -> None:
+    """Draw a ``kind: graph`` spec into an axes SOMEONE ELSE OWNS.
+
+    Split out of ``_render_graph`` so the same spec can be drawn either as a figure of
+    its own or as one panel of a ``kind: stack``. The split is the whole reason stacking
+    is cheap: every ``plot_style.draw_*`` function already takes an ``ax``, and it was
+    only the dispatch wrappers that insisted on making their own figure.
+
+    Nothing here changed — same key checks, same builder, same draw calls in the same
+    order — so a standalone graph renders byte-for-byte as it did before.
+    """
     from .plot_style import draw_graph, draw_directed_graph, apply_ax_style
 
     directed = bool(figure_spec.get("directed"))
@@ -867,12 +898,6 @@ def _render_graph(figure_spec: dict) -> None:
             "draw_graph")
 
     G, pos, label_map = _build_graph(figure_spec)
-
-    # A tall layout needs a tall canvas. Equal aspect fits the drawing inside the
-    # axes box, so a two-column graph forced into the default 5x4 is compressed
-    # until its node circles crowd and its labels have nowhere to go. Default
-    # unchanged, so every pre-0.8.0 figure keeps its exact canvas.
-    fig, ax = plt.subplots(figsize=tuple(figure_spec.get("figsize") or (5, 4)))
     if directed:
         draw_directed_graph(G, ax, pos=pos, labels=label_map or None,
                             node_size=figure_spec.get("node_size"),
@@ -880,7 +905,143 @@ def _render_graph(figure_spec: dict) -> None:
     else:
         draw_graph(G, ax, pos=pos, **_resolve_graph_annotations(figure_spec, G))
     apply_ax_style(ax)
+
+
+def _draw_bowtie_schematic_into(ax, figure_spec: dict) -> None:
+    """Draw ``kind: bowtie_schematic`` into a given axes."""
+    from .plot_style import draw_bowtie_schematic
+
+    _check_figure_keys("bowtie_schematic", figure_spec,
+                       _FIGURE_KEYS["bowtie_schematic"], "draw_bowtie_schematic")
+    draw_bowtie_schematic(
+        ax,
+        highlight=figure_spec.get("highlight"),
+        show_fringes=bool(figure_spec.get("show_fringes", True)),
+        labels=bool(figure_spec.get("labels", True)),
+        title=figure_spec.get("title"),
+    )
+
+
+def _render_bowtie_schematic(figure_spec: dict) -> None:
+    fig, ax = plt.subplots(figsize=tuple(figure_spec.get("figsize") or (6.4, 4.6)))
+    _draw_bowtie_schematic_into(ax, figure_spec)
     plt.tight_layout()
+    display(fig)
+    plt.close(fig)
+
+
+#: The kinds that can render into an axes they do not own — i.e. the ones a `stack` may
+#: contain. Every `plot_style.draw_*` takes an `ax`, so this list is short only because
+#: the dispatch wrappers have not all been split yet; extending it is mechanical.
+_STACKABLE = {
+    "graph": _draw_graph_into,
+    "bowtie_schematic": _draw_bowtie_schematic_into,
+}
+
+
+def _render_stack(figure_spec: dict) -> None:
+    """Render ``kind: stack`` — two or more figures STACKED VERTICALLY as one figure.
+
+    Needed in two independent places in Lesson 6, which is what makes it a capability
+    rather than a one-off: 6.1's q_15 wants the bow-tie schematic above the 16-node
+    university network, and 6.2's random-walk cell wants the 8-page graph above the
+    walk-vs-PageRank table. Neither seam could express it — a section's `figure:` is one
+    spec, and every renderer made its own figure.
+
+    STACKED, not side-by-side. That is forced, not chosen: the university network is
+    already cramped horizontally and the walk table is 8 columns wide, so side-by-side
+    crushes both.
+
+    A child kind that has not been split out to draw into a caller's axes RAISES, rather
+    than rendering something subtly different and staying quiet about it — the standing
+    rule for this dispatch.
+    """
+    _check_figure_keys("stack", figure_spec, _FIGURE_KEYS["stack"], "_render_stack")
+    panels = figure_spec.get("figures") or []
+    if len(panels) < 2:
+        raise ValueError(
+            f"figure kind 'stack' needs at least 2 entries under 'figures:', got "
+            f"{len(panels)}. A stack of one is just that figure — use it directly.")
+
+    ratios = figure_spec.get("ratios") or [1.0] * len(panels)
+    if len(ratios) != len(panels):
+        raise ValueError(
+            f"figure kind 'stack': 'ratios' has {len(ratios)} entries but there are "
+            f"{len(panels)} figures.")
+
+    for p in panels:
+        kind = p.get("kind", "graph")
+        if kind not in _STACKABLE:
+            raise ValueError(
+                f"figure kind 'stack': cannot stack a {kind!r} panel — that renderer "
+                f"still makes its own figure and cannot draw into a shared axes. "
+                f"Stackable kinds: {', '.join(sorted(_STACKABLE))}. (Split its "
+                f"`_render_{kind}` into a `_draw_{kind}_into(ax, spec)` + a wrapper, "
+                f"as `graph` is, and add it to _STACKABLE.)")
+
+    w = float(figure_spec.get("width", 6.4))
+    hspace = float(figure_spec.get("hspace", 0.12))
+
+    # 🧨 THE PANEL HEIGHTS COME FROM EACH PANEL'S OWN SHAPE, AND THEY MUST BE RIGHT
+    # BEFORE ANYTHING IS DRAWN. This is the whole subtlety of stacking in this engine.
+    #
+    # Every figure here locks EQUAL ASPECT (a graph whose x and y scales differ is a
+    # graph with the wrong angles), and `frame_signed_axes` chooses its data limits to
+    # fit the AXES BOX IT IS GIVEN. So the box's shape is an INPUT to the drawing, not a
+    # consequence of it: hand a wide graph a square box and it pads its own limits until
+    # they are square, and the nodes end up floating in a band of white space that
+    # `tight_layout` cannot reclaim — because the space is INSIDE the axes.
+    #
+    # The first cut of this drew the panels first and measured them afterwards. It could
+    # not work: by the time there was anything to measure, the limits had already been
+    # baked against the wrong box. Two correct drawings, a third of a page of nothing
+    # between them.
+    #
+    # A child's own `figsize:` is exactly the statement of shape we need — it is what the
+    # author already declares for that figure standing alone (web16 is 9.6 x 3.8: wide
+    # and short, which is what a 16-node university network wants). So the stack reads
+    # each child's aspect, sizes the figure to fit them all at the shared width, and
+    # draws ONCE, into boxes that are already the right shape.
+    _DEFAULT_ASPECT = {"graph": 4.0 / 5.0, "bowtie_schematic": 4.6 / 6.4}
+
+    def panel_aspect(p):
+        fs = p.get("figsize")
+        if fs and float(fs[0]):
+            return float(fs[1]) / float(fs[0])
+        return _DEFAULT_ASPECT.get(p.get("kind", "graph"), 0.8)
+
+    aspects = ([panel_aspect(p) for p in panels] if figure_spec.get("ratios") is None
+               else [float(r) for r in ratios])
+    total_h = w * sum(aspects) * (1.0 + hspace) + 0.25
+
+    # 🧨 THE PANEL GAP IS SET THROUGH `tight_layout`, NOT THROUGH THE GRIDSPEC — AND THAT
+    # IS NOT A STYLE PREFERENCE, IT IS THE WARNING FIX.
+    #
+    # Passing `gridspec_kw={"hspace": ...}` marks the GridSpec as having locally-modified
+    # subplot params. matplotlib's `tight_layout` treats such an Axes as one it cannot
+    # lay out (`get_subplotspec_list` returns None for it) and emits
+    #
+    #     UserWarning: This figure includes Axes that are not compatible with
+    #     tight_layout, so results might be incorrect.
+    #
+    # which renders as a RED WARNING BOX ABOVE THE STUDENT'S FIGURE. The figure itself was
+    # fine; the warning was not. And a warning a student is trained to ignore is worse
+    # than no warning at all, in a course that is teaching them to read warnings.
+    #
+    # It has nothing to do with the equal-aspect axes (verified: a plain two-row subplots
+    # call with equal-aspect children warns not at all, while the same call with
+    # `gridspec_kw={"hspace": ...}` warns even with no aspect set). The gap is therefore
+    # requested through `tight_layout`'s own `h_pad`, in font-size units, which leaves the
+    # GridSpec unmodified and lets `tight_layout` do the job it is for.
+    fig, axes = plt.subplots(len(panels), 1, figsize=(w, total_h),
+                             height_ratios=aspects)
+    for ax, p in zip(list(axes), panels):
+        # The child's `figsize` has done its job (it set this panel's shape); drop it so
+        # the renderer does not think it owns a figure.
+        child = {k: v for k, v in p.items() if k != "figsize"}
+        _STACKABLE[child.get("kind", "graph")](ax, child)
+
+    fig.tight_layout(h_pad=hspace * 8.0)
     display(fig)
     plt.close(fig)
 
@@ -1057,10 +1218,17 @@ def _render_figure(ws, figure_spec: dict) -> None:
     if kind == "iteration_table":
         _render_iteration_table(figure_spec)
         return
+    if kind == "bowtie_schematic":
+        _render_bowtie_schematic(figure_spec)
+        return
+    if kind == "stack":
+        _render_stack(figure_spec)
+        return
     if kind != "graph":
         raise ValueError(
             f"unknown figure kind {kind!r}. Known: 'graph', 'image', "
             f"'payoff_matrix', 'bipartite_market', 'matrix', 'iteration_table', "
+            f"'bowtie_schematic', 'stack', "
             f"{', '.join(repr(k) for k in sorted(_AUCTION_KINDS))}. "
             f"(This used to print a note and render nothing.)")
 
