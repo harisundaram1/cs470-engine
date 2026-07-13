@@ -197,10 +197,197 @@ def test_hits_end_normalization_matches_step_normalization():
           {n: raw[n] / total for n in G}, stepwise)
 
 
-def test_hits_limit_is_independent_of_the_starting_vector():
+def test_hits_limit_settles_nonnegative_and_normalized():
     lim = hits_limit(fig_14_15())
     check_true("authority settles", all(v >= 0 for v in lim["authority"].values()))
     check("authority sums to 1", sum(lim["authority"].values()), F(1))
+
+
+# --- `initial=` (0.8.1) -------------------------------------------------------
+#
+# hits_iterations grew an `initial=` in 0.8.1 to match pagerank_iterations, which
+# had had one all along. The asymmetry was an omission, not a decision, and it had
+# a cost: the test directly below THIS COMMENT used to be called
+# `test_hits_limit_is_independent_of_the_starting_vector` — a name asserting the
+# one property the missing parameter made impossible to test. It checked that the
+# limit was nonnegative and summed to 1, and nothing whatever about starting
+# vectors. It has been renamed to what it actually does, and the property it
+# claimed is now genuinely tested, below.
+
+
+def test_omitting_initial_reproduces_the_pre_0_8_1_output_exactly():
+    """(a) THE NO-REGRESSION TEST. `initial=None` must reproduce, value for value,
+    what the all-ones initialization produced before the parameter existed —
+    including the `_raw` rows and `state_0`."""
+    for name, G in (("14.11", fig_14_11()), ("14.15", fig_14_15()),
+                    ("14.16", fig_14_16())):
+        default = hits_iterations(G, 4)
+        explicit = hits_iterations(G, 4, initial={n: 1 for n in G})
+        check(f"{name}: initial=None == explicit all-ones", default, explicit)
+        # state_0 is still the all-ones initialization, exactly as before.
+        check(f"{name}: state_0 hub is all ones",
+              default[0]["hub"], {n: F(1) for n in G})
+        check(f"{name}: state_0 authority is all ones",
+              default[0]["authority"], {n: F(1) for n in G})
+    # And the chapter's worked vectors are untouched (the values the worksheets
+    # print). If `initial` had perturbed the default path, these would move.
+    a = hits_iterations(fig_14_11(), 1)[1]["authority"]
+    check("14.11 round-1 authority unmoved", vec(a, [1, 2, 3, 4]),
+          fr("1/6", "1/6", "1/3", "1/3"))
+
+
+def _gap(a, b):
+    """Largest coordinate-wise difference between two score vectors."""
+    return max(abs(a[n] - b[n]) for n in a)
+
+
+def test_a_skewed_start_converges_to_the_SAME_limit():
+    """(b) THE PEDAGOGICAL CLAIM, PROVEN. This is what the parameter exists for.
+
+    HITS is the power method on MMᵀ / MᵀM, so any start with a positive component
+    along the dominant eigenvector is amplified toward the SAME eigenvector. Skew
+    everything onto one page, reverse the ranking, use absurd magnitudes — the limit
+    is the same. Only the number of rounds it takes changes.
+
+    ⚠️ COMPARED WITH A TOLERANCE, NOT WITH `==`, and that is not a fudge — it is the
+    mathematics. The HITS limit is an EIGENVECTOR and is generally IRRATIONAL: on
+    Fig 14.15 the limiting authority of page C is exactly sqrt(2) - 1, which no
+    Fraction can represent. The iteration therefore never reaches a fixed point, and
+    hits_limit necessarily returns a rational APPROXIMATION after max_iter rounds.
+    Two different starts land at slightly different points on the approach, so they
+    agree to within the residual — not byte-for-byte. `test_..._gap_shrinks` below
+    is what turns "they are close" into "they converge".
+    """
+    TOL = F(1, 10 ** 20)          # residual at max_iter=200 is ~1e-153; 1e-20 is slack
+    for name, G, order in (("14.11", fig_14_11(), [1, 2, 3, 4]),
+                           ("14.15", fig_14_15(), list("ABCDE")),
+                           ("14.16", fig_14_16(), list("ABCDEFGH"))):
+        baseline = hits_limit(G)
+        starts = {
+            "all-ones (the default)": {n: F(1) for n in order},
+            "skewed onto one page": {n: (F(1000) if i == 0 else F(1))
+                                     for i, n in enumerate(order)},
+            "reversed magnitudes": {n: F(len(order) - i)
+                                    for i, n in enumerate(order)},
+            "tiny and lopsided": {n: F(1, 7 ** (i + 1))
+                                  for i, n in enumerate(order)},
+        }
+        for label, init in starts.items():
+            lim = hits_limit(G, initial=init)
+            for row in ("authority", "hub"):
+                g = _gap(lim[row], baseline[row])
+                check_true(
+                    f"{name}: {row} limit from {label!r} agrees with the default "
+                    f"(gap {float(g):.2e} < 1e-20)", g < TOL)
+
+
+def test_the_gap_between_two_starts_shrinks_with_more_rounds():
+    """The limits merely being CLOSE would prove nothing on its own — two arbitrary
+    vectors can be close. What makes it convergence is that the gap SHRINKS
+    geometrically as the iteration runs longer. Measured on Fig 14.15:
+    max_iter 10 -> 4.8e-8, 20 -> 1.1e-15, 40 -> 5.2e-31, 80 -> 1.2e-61.
+    """
+    G = fig_14_15()
+    skew = {n: (F(50) if n == "A" else F(1)) for n in G}
+    gaps = [_gap(hits_limit(G, max_iter=m)["authority"],
+                 hits_limit(G, max_iter=m, initial=skew)["authority"])
+            for m in (10, 20, 40, 80)]
+    for i in range(len(gaps) - 1):
+        check_true(f"gap shrinks between max_iter steps {i} -> {i+1} "
+                   f"({float(gaps[i]):.1e} -> {float(gaps[i+1]):.1e})",
+                   gaps[i + 1] < gaps[i])
+    check_true(f"and it shrinks HARD (1e-8 -> {float(gaps[-1]):.1e})",
+               gaps[-1] < F(1, 10 ** 50))
+
+
+def test_the_hits_limit_is_irrational_so_the_iteration_never_lands_on_it():
+    """Why hits_limit returns an approximation, pinned. Fig 14.15's limiting
+    authority for C is sqrt(2) - 1. No Fraction equals it, so no finite iteration
+    reaches a fixed point — successive states are NEVER exactly equal, and any test
+    that compares two limits with `==` is asserting something false."""
+    G = fig_14_15()
+    states = hits_iterations(G, 30)
+    repeats = [k for k in range(2, 31)
+               if states[k]["authority"] == states[k - 1]["authority"]]
+    check("the iteration never lands on a fixed point", repeats, [])
+    c = hits_limit(G)["authority"]["C"]
+    check_true("C's authority is sqrt(2) - 1 to 1e-30",
+               abs(float(c) - (2 ** 0.5 - 1)) < 1e-15)
+    check_true("...but it is not exactly representable: it is a Fraction "
+               "approximation, so squaring (c+1) does not give exactly 2",
+               (c + 1) ** 2 != 2)
+
+
+def test_a_skewed_start_moves_the_EARLY_rounds_but_not_the_limit():
+    """The claim above is only interesting if the start genuinely perturbs the
+    iteration. It does: round 1 from a skewed start is NOT round 1 from all-ones.
+    So the limits agreeing is a real convergence result, not a no-op."""
+    G = fig_14_15()
+    skew = {n: (F(50) if n == "A" else F(1)) for n in G}
+    r1_default = hits_iterations(G, 1)[1]["authority"]
+    r1_skewed = hits_iterations(G, 1, initial=skew)[1]["authority"]
+    check_true("round 1 actually differs", r1_default != r1_skewed)
+    check_true("but the limits agree (to the iteration's residual — the limit is "
+               "irrational, so `==` would be the wrong assertion)",
+               _gap(hits_limit(G, initial=skew)["authority"],
+                    hits_limit(G)["authority"]) < F(1, 10 ** 20))
+
+
+def test_initial_preserves_exact_fractions():
+    """(c) EXACTNESS. A start given as ints / 'p/q' strings / floats / Fractions is
+    coerced to exact Fractions — no float creeps into the iteration, so the printed
+    scores stay 3/7 and never 0.42857142857142855."""
+    G = fig_14_15()
+    init = {"A": 3, "B": "7/2", "C": F(1, 3), "D": 0.25, "E": 2}
+    states = hits_iterations(G, 2, initial=init)
+    for st in states:
+        for row in ("authority", "hub", "authority_raw", "hub_raw"):
+            for n, v in st[row].items():
+                check_true(f"{row}[{n}] is an exact Fraction", isinstance(v, F))
+    check("'7/2' parsed exactly", states[0]["hub"]["B"], F(7, 2))
+    check("0.25 parsed exactly", states[0]["hub"]["D"], F(1, 4))
+    # And the limit off this ragged start is still the chapter's limit (to the
+    # iteration's residual — see test_the_hits_limit_is_irrational_...).
+    check_true("ragged start still lands on the default limit",
+               _gap(hits_limit(G, initial=init)["authority"],
+                    hits_limit(G)["authority"]) < F(1, 10 ** 20))
+
+
+def test_initial_is_the_HUB_vector_authorities_are_overwritten_immediately():
+    """`initial` sets the starting HUB scores. The first sub-step of every update
+    recomputes each authority FROM the hubs, so the starting authorities are
+    overwritten before they are ever read — state_0 reports them and nothing else
+    depends on them. Pinned so nobody later 'fixes' the loop to consume them."""
+    G = fig_14_15()
+    start = {n: F(2) for n in G}
+    a = hits_iterations(G, 3, initial=start)
+    # Same hub start, but state_0's authorities are reported as given...
+    check("state_0 authority is what was passed", a[0]["authority"], start)
+    # ...and every state from 1 on is determined by the HUB start alone.
+    b = hits_iterations(G, 3, initial=start)
+    check("iteration is a function of the hub start", a[1:], b[1:])
+
+
+def test_initial_missing_a_node_raises_rather_than_silently_dropping_it():
+    """A start that omits a node is an authoring error, not a default. It raises —
+    the alternative is a figure that quietly iterates from a vector the author did
+    not write."""
+    G = fig_14_15()
+    raises("hits: partial initial raises",
+           lambda: hits_iterations(G, 1, initial={"A": 1}), ValueError)
+    raises("pagerank: partial initial raises",
+           lambda: pagerank_iterations(G, 1, initial={"A": 1}), ValueError)
+
+
+def test_hits_and_pagerank_share_initial_semantics():
+    """The two helpers resolve `initial` through the same code path, so their
+    argument cannot drift apart again — which is the bug this release fixes."""
+    G = fig_14_6()
+    init = {n: F(i + 1) for i, n in enumerate(G)}
+    h = hits_iterations(G, 1, initial=init)[0]["hub"]
+    p = pagerank_iterations(G, 1, initial=init)[0]
+    check("both read the same starting vector, exactly", h, p)
+    check("both coerce to Fraction", {n: F(i + 1) for i, n in enumerate(G)}, p)
 
 
 # --- PageRank: the Basic rule -------------------------------------------------

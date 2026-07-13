@@ -97,6 +97,32 @@ def _normalize(vec):
     return {n: v / total for n, v in vec.items()}
 
 
+def _initial_vector(order, initial, default):
+    """The vector an iteration STARTS from — ``initial`` if given, else ``default``
+    on every node.
+
+    ONE implementation, shared by HITS and PageRank, because the two used to differ
+    for no reason: ``pagerank_iterations`` took an ``initial=`` and
+    ``hits_iterations`` did not. That asymmetry was not a design decision, it was an
+    omission, and it blocked the one thing worth showing about HITS — that the scores
+    converge to the SAME limit no matter where you start them (see
+    :func:`hits_limit`). Sharing the resolution here means the two helpers cannot
+    drift apart again on the shape of their argument or on its validation.
+
+    Values are coerced to exact ``Fraction``s, so a caller may pass ints, floats,
+    ``'p/q'`` strings or Fractions and still get exact arithmetic downstream.
+    """
+    if initial is None:
+        return {n: default for n in order}
+    missing = [n for n in order if n not in initial]
+    if missing:
+        raise ValueError(
+            f"initial: no starting value for {missing}. The iteration is defined on "
+            f"every node, so supply one entry per node — or omit `initial` "
+            f"entirely to start from the default.")
+    return {n: _as_fraction(initial[n]) for n in order}
+
+
 # -----------------------------------------------------------------------------
 # Matrices (R4's data source)
 # -----------------------------------------------------------------------------
@@ -159,7 +185,7 @@ def scaled_flow_matrix(G, nodes=None, s=Fraction(4, 5)):
 # HITS  (E&K §14.2)
 # -----------------------------------------------------------------------------
 
-def hits_iterations(G, steps=1, nodes=None, normalize=True):
+def hits_iterations(G, steps=1, nodes=None, normalize=True, initial=None):
     """Run k hub-authority updates; return the state after EACH one.
 
     E&K's rule, verbatim: all hub and authority scores start at 1; each update
@@ -169,7 +195,7 @@ def hits_iterations(G, steps=1, nodes=None, normalize=True):
     scores of the pages p points to.
 
     Returns ``[state_0, state_1, ... state_k]``, where ``state_0`` is the
-    all-ones initialization and each later state is a dict::
+    initialization and each later state is a dict::
 
         {"authority": {node: Fraction}, "hub": {node: Fraction},
          "authority_raw": {...}, "hub_raw": {...}}
@@ -180,10 +206,26 @@ def hits_iterations(G, steps=1, nodes=None, normalize=True):
     at the very end. **Both give identical normalized answers**: the updates are
     linear, so an intermediate positive rescale cancels out. Only the
     *unnormalized* intermediates differ, and those are kept in the ``_raw`` keys.
+
+    ``initial`` — a ``{node: value}`` starting vector, defaulting to the chapter's
+    all-ones. Same shape and same coercion as ``pagerank_iterations``' ``initial``
+    (they share :func:`_initial_vector`); omit it and the output is exactly what it
+    was before this parameter existed.
+
+    ⚠️ ``initial`` SETS THE STARTING **HUB** SCORES, and the starting authority
+    scores are cosmetic. Look at the loop: the first thing an update does is
+    recompute every authority from the hub scores, so whatever authorities the
+    iteration started with are overwritten before they are ever read. ``state_0``
+    reports them anyway (it reports what you passed in, exactly as it always
+    reported the all-ones), but they do not influence a single number after it.
+    This is not a quirk of the implementation — it is why the *pedagogy* works: the
+    hub vector is the only thing you can perturb, and perturbing it still lands on
+    the same limit (:func:`hits_limit`).
     """
     order = _node_list(G, nodes)
-    hub = {n: Fraction(1) for n in order}
-    auth = {n: Fraction(1) for n in order}
+    start = _initial_vector(order, initial, Fraction(1))
+    hub = dict(start)
+    auth = dict(start)
     out = [{"authority": dict(auth), "hub": dict(hub),
             "authority_raw": dict(auth), "hub_raw": dict(hub)}]
 
@@ -202,7 +244,7 @@ def hits_iterations(G, steps=1, nodes=None, normalize=True):
     return out
 
 
-def hits_limit(G, nodes=None, max_iter=200):
+def hits_limit(G, nodes=None, max_iter=200, initial=None):
     """The normalized hub/authority vectors HITS settles on.
 
     Iterates until the normalized vectors stop moving (exact equality — the
@@ -213,10 +255,37 @@ def hits_limit(G, nodes=None, max_iter=200):
     normalized HITS iteration is the power method on the symmetric PSD matrices
     MᵀM and MMᵀ. It can still be *periodic* on adversarial bipartite-like graphs,
     so the loop is bounded and simply returns the last state if it never repeats.
+
+    ``initial`` — the starting vector (see :func:`hits_iterations`). **THE LIMIT
+    DOES NOT DEPEND ON IT**, for any start that is positive somewhere: the iteration
+    is the power method, so it converges on the dominant eigenvector of MMᵀ / MᵀM
+    whatever it set out from, and the starting vector decides only how many rounds
+    that takes. That claim is the entire point of the parameter — a worksheet can
+    now *demonstrate* it rather than assert it.
+
+    ⚠️ WHAT THIS FUNCTION RETURNS IS AN APPROXIMATION, AND IT HAS TO BE. Unlike
+    :func:`pagerank_equilibrium`, whose stationary vector is the exact rational
+    solution of a linear system, the HITS limit is an EIGENVECTOR — and it is
+    generally IRRATIONAL. On Fig 14.15 the limiting authority of page C is exactly
+    ``sqrt(2) - 1``, which no ``Fraction`` can hold. So the iteration never lands on
+    a fixed point, the "have the vectors stopped moving?" test above never fires on
+    a real graph, and this returns the state after ``max_iter`` rounds: a rational
+    approximation whose residual shrinks geometrically with ``max_iter``.
+
+    The practical consequence for a caller: **two runs from different starting
+    vectors do not come back byte-equal.** They come back agreeing to within that
+    residual — about 1e-153 at the default ``max_iter``, and demonstrably shrinking
+    as ``max_iter`` grows (10 -> 4.8e-8, 20 -> 1.1e-15, 40 -> 5.2e-31, 80 ->
+    1.2e-61). Compare limits with a tolerance, never with ``==``. Both facts are
+    pinned by ``test_a_skewed_start_converges_to_the_SAME_limit``.
+
+    (A start that is zero everywhere is the degenerate exception: there is no signal
+    to amplify, zeros stay zero, and the power method promises nothing.)
     """
     order = _node_list(G, nodes)
     prev = None
-    for st in hits_iterations(G, max_iter, nodes=order, normalize=True)[1:]:
+    for st in hits_iterations(G, max_iter, nodes=order, normalize=True,
+                              initial=initial)[1:]:
         cur = (tuple(st["authority"][n] for n in order),
                tuple(st["hub"][n] for n in order))
         if cur == prev:
@@ -318,10 +387,7 @@ def pagerank_iterations(G, steps=1, nodes=None, rule="basic", s=Fraction(4, 5),
     N = (flow_matrix(G, order) if rule == "basic"
          else scaled_flow_matrix(G, order, s))
 
-    if initial is None:
-        r = {node: Fraction(1, n) for node in order}
-    else:
-        r = {node: _as_fraction(initial[node]) for node in order}
+    r = _initial_vector(order, initial, Fraction(1, n))
 
     out = [dict(r)]
     for _ in range(steps):
@@ -375,8 +441,7 @@ def pagerank_limit(G, nodes=None, rule="basic", s=Fraction(4, 5), max_iter=1000,
 
     N = (flow_matrix(G, order) if rule == "basic"
          else scaled_flow_matrix(G, order, s))
-    r = ({node: Fraction(1, n) for node in order} if initial is None
-         else {node: _as_fraction(initial[node]) for node in order})
+    r = _initial_vector(order, initial, Fraction(1, n))
 
     def key(vec):
         return tuple(vec[node] for node in order)

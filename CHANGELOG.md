@@ -16,6 +16,71 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [0.8.1] — 2026-07-12 — `initial=` on the HITS iteration, **NOT tagged, NOT deployed**
+
+A one-parameter fix, and the parameter is the whole point of a concept cell.
+
+### Added
+
+- **`hits_iterations(..., initial=None)`** — a starting vector, matching
+  `pagerank_iterations`, which had taken one all along. The asymmetry was an
+  **omission, not a design decision**, and it blocked the only thing worth showing
+  about HITS: that the scores converge to the **same limit no matter where you start
+  them**. Without a way to vary the start, Worksheet 6.1's stepper cell could only
+  animate an iteration; it could not demonstrate the property. `hits_limit` forwards
+  it too, so the claim can be *checked* and not merely asserted.
+- **`_initial_vector(order, initial, default)`** — ONE shared resolver, now used by
+  `hits_iterations`, `hits_limit`, `pagerank_iterations` and `pagerank_limit`. Same
+  shape, same `Fraction` coercion (ints / floats / `'p/q'` strings / Fractions), same
+  validation, for both algorithms. The two helpers cannot drift apart on this
+  argument again, which is exactly how they came to differ in the first place.
+
+### Changed
+
+- A partial `initial` (one that omits a node) now **raises `ValueError`** naming the
+  missing nodes, on *both* algorithms. It previously raised a bare `KeyError` from
+  inside `pagerank_iterations`. An incomplete starting vector is an authoring
+  mistake, not a request for defaults.
+- `hits_limit`'s docstring now states plainly that **what it returns is an
+  approximation, and has to be**: the HITS limit is an *eigenvector* and is generally
+  **irrational** (on Fig 14.15 page C's limiting authority is exactly `sqrt(2) - 1`),
+  so — unlike `pagerank_equilibrium`, which solves an exact rational linear system —
+  the iteration never lands on a fixed point and the "have the vectors stopped
+  moving?" check never fires on a real graph. **Two runs from different starts do not
+  come back `==`.** They agree to within the residual (~1e-153 at the default
+  `max_iter`), and the residual shrinks geometrically. Compare limits with a
+  tolerance.
+
+### Not changed — and proven so
+
+- **Omitting `initial` reproduces 0.8.0 exactly**, including `state_0` and the `_raw`
+  rows (`test_omitting_initial_reproduces_the_pre_0_8_1_output_exactly`).
+- **Render regression: 723/723 figures BYTE-IDENTICAL** to 0.8.0 across all 12
+  worksheet YAMLs (both seams — dispatch and concept cells). Baseline rendered from a
+  real `cb7c6d0` worktree with `cs470_engine.plot_style.__file__` **asserted** to
+  resolve there before a single figure was drawn — `PYTHONPATH` alone would have
+  silently imported the working tree and compared 0.8.1 against itself. Run
+  **unpinned** (`PYTHONHASHSEED=random`), twice per engine; both self-diffs identical,
+  so the pass is not a masked non-determinism.
+- `ENGINE_SYMBOLS` needs no update: `initial=` adds a **parameter**, not a public
+  symbol, and `hits_iterations` / `hits_limit` were already on the frozen list. The
+  drift test (`test_engine_symbols_covers_the_engine_surface`) confirms it.
+
+### Fixed (a test that was lying)
+
+- `test_hits_limit_is_independent_of_the_starting_vector` **never tested that**. It
+  asserted the limit was nonnegative and summed to 1 — nothing about starting vectors,
+  because there was no way to set one. A test named for the property that the missing
+  parameter made untestable. Renamed to
+  `test_hits_limit_settles_nonnegative_and_normalized`, and the property it claimed is
+  now genuinely tested, from four different starting vectors on three figures, with
+  the gap-shrinks-with-`max_iter` check that turns "they are close" into "they
+  converge".
+
+Tests: **39/39** (`tests/test_link_analysis.py`), 24/24 (`tests/test_figure_dispatch.py`).
+
+---
+
 ## [0.8.0] — 2026-07-12 — built + proven, **NOT tagged, NOT deployed**
 
 The Lesson 6 renderer/helper package: the blocking gate in front of L6 authoring.
