@@ -16,6 +16,47 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [0.10.3] — 2026-07-14 — IN / OUT, placed against the space they actually occupy
+
+### Fixed — the bow-tie's lobe labels were centred against a row they were not sitting in
+
+**This placement has now been wrong TWICE, in opposite directions, and a human found both.**
+0.10.2 moved `IN`/`OUT` off the lobe's area centroid and onto the midpoint of the lobe's
+**whole x-extent** (`-span/2`). That is the middle of the row at `y = 0` — but the labels were
+**lifted to `y = 0.45*half_h`** to clear the flow arrow, and the lobe is a TRIANGLE WITH ITS
+APEX AT THE ORIGIN, so it **tapers**: at the label's own height the lobe only reaches
+`x = -0.45*span`. The label was therefore centred against a part of the shape it was not in,
+came out jammed against the taper, and **its box hung off the edge of its own lobe.**
+
+    placement                        IN's x     box inside the lobe?
+    -2*span/3   area centroid         -2.67     yes — legal, just off-centre
+    -span/2     whole x-extent (0.10.2) -2.00   NO  — box left the lobe   <- shipped
+    -span*0.80  outboard of the arrow  -3.20    yes                       <- 0.10.3
+
+**Now:** each label sits **outboard of its flow arrow, on the arrow's own axis (`y = 0`)** —
+centred in the lobe span the arrow leaves free, the midpoint of `[span, flow_tail]`. The
+figure reads as one horizontal line, which is the bow-tie's actual claim:
+**IN → (arrow) → SCC → (arrow) → OUT.** The lift existed only to dodge the arrow; the label is
+now *beside* the arrow, so the lift had no remaining job.
+
+`flow_tail` is now **one constant with two consumers** — the arrow is drawn from it and the
+label is placed from it — so the label cannot drift onto the arrow if the arrow ever moves (F8).
+
+### Added — `tests/test_schematic_geometry.py` (B8), with a red case
+
+Asserts each lobe label's box is **fully inside the lobe it names**, **clear of that lobe's
+flow arrow**, and **mirror-symmetric** with its opposite. The red case replays both historical
+placements: `-span/2` **reds** (its box leaves the lobe).
+
+**And it says what it cannot see:** the *centroid* placement passes every check in the file —
+it was legal and merely ugly. **Whether a label is well placed inside a legal region is an
+eyeball call, and this gate does not make it.** A green B8 is not permission to skip looking.
+
+### Render regression (0.10.2 → 0.10.3, 860 figures, `PYTHONHASHSEED=random`)
+
+9 moved — **all of them 6.1's bow-tie schematics** (`q_8`, `q_9`, `q_12`, and
+`concept_bowtie_explorer` in all six states). **L1–L5: 0 of 851 moved. 6.2: 0 moved.**
+
 ## [0.10.2] — 2026-07-14 — the blob was never in points: a frozen dpi, found only in the container
 
 ### Fixed — `_points_ellipse` froze its dpi at construction (LESSONS.md F7, instance six)

@@ -4294,6 +4294,16 @@ def draw_bowtie_schematic(ax, *, highlight=None, show_fringes=True,
     S = BOWTIE_SCHEMATIC
     R, span, half_h = S["core_radius"], S["lobe_span"], S["lobe_half_h"]
 
+    # Where each lobe's flow arrow BEGINS, as a fraction of the lobe span. The arrow and
+    # the lobe's label are both placed from this one number: the label sits in the space
+    # OUTBOARD of the arrow, so if the arrow ever moves and the label does not, the label
+    # lands on top of it. One constant, two consumers — never two copies (F8).
+    flow_tail = span * 0.60
+    # The label's x: centred in the lobe's span that is left over OUTBOARD of the arrow,
+    # i.e. the midpoint of [span, flow_tail]. On the arrow's own axis (y = 0), so the
+    # figure reads as one line: IN -> (arrow) -> SCC -> (arrow) -> OUT.
+    label_x = (span + flow_tail) / 2.0
+
     def alpha_for(role):
         if highlight is None:
             return S["region_alpha"]
@@ -4367,9 +4377,9 @@ def draw_bowtie_schematic(ax, *, highlight=None, show_fringes=True,
 
     # --- the core, on top, and the flow THROUGH it --------------------------------
     region(Ellipse((0.0, 0.0), 2 * R, 2 * R), "SCC")
-    _flow(ax, (-span * 0.60, 0.0), (-R * 1.05, 0.0), BOWTIE_COLORS["IN"],
+    _flow(ax, (-flow_tail, 0.0), (-R * 1.05, 0.0), BOWTIE_COLORS["IN"],
           highlight == "IN")
-    _flow(ax, (R * 1.05, 0.0), (span * 0.60, 0.0), BOWTIE_COLORS["OUT"],
+    _flow(ax, (R * 1.05, 0.0), (flow_tail, 0.0), BOWTIE_COLORS["OUT"],
           highlight == "OUT")
 
     if labels:
@@ -4390,19 +4400,31 @@ def draw_bowtie_schematic(ax, *, highlight=None, show_fringes=True,
                     # "unreadably faint" hole this fix exists to climb out of.
                     alpha=1.0 if (highlight is None or role == highlight) else 0.78)
 
-        # IN and OUT sit at the MIDPOINT OF THEIR LOBE'S X-EXTENT, lifted clear of the
-        # flow arrow that runs along y=0. One rule, both lobes, symmetric.
+        # IN and OUT sit OUTBOARD OF THEIR FLOW ARROW, ON THE ARROW'S OWN AXIS (y = 0) —
+        # centred in the lobe span the arrow leaves free, i.e. the midpoint of
+        # [span, flow_tail]. The figure then reads as one horizontal line, which is the
+        # bow-tie's actual claim: IN -> (arrow) -> SCC -> (arrow) -> OUT.
         #
-        # ⚠️ NOT the area centroid. A triangle's centroid is NOT its visual centre: it sits
-        # a third of the way from the base, so for these two mirrored lobes (base outboard,
-        # apex at the core) the centroid pulls IN to the LEFT and OUT to the RIGHT — by
-        # span/6 each, in OPPOSITE directions. That is a correct rule computing the wrong
-        # quantity: a label is centred against the shape's EXTENT, which is what the eye
-        # bisects, not against its mass. The lobe spans x in [-span, 0], so the midpoint
-        # is -span/2, not -2*span/3.
-        lab(-span / 2.0, half_h * 0.45, "IN", "IN")
+        # ⚠️ THIS HAS NOW BEEN WRONG TWICE, IN OPPOSITE DIRECTIONS. Record both, because
+        # each is the obvious thing to reach for (F9):
+        #
+        #   1. `-2*span/3` — the lobe's AREA CENTROID. A triangle's centroid is not its
+        #      visual centre; it sits a third of the way from the base, so on two MIRRORED
+        #      lobes it pushes IN left and OUT right, by span/6 each, in opposite
+        #      directions. Correct rule, wrong quantity: the eye bisects EXTENT, not MASS.
+        #
+        #   2. `-span/2` — the midpoint of the WHOLE TRIANGLE's x-extent. Also wrong, and
+        #      worse. The lobe's apex is AT THE ORIGIN (tucked behind the core), so the
+        #      triangle TAPERS: `-span/2` is the middle of the row at y = 0, but the label
+        #      was lifted to y = 0.45*half_h, where the lobe only reaches x = -0.45*span.
+        #      **It was centred against a row it was not sitting in**, and came out jammed
+        #      against the taper, crowding the core. Found by a human looking at PL.
+        #
+        # The lesson both share: **a label is centred against the space it actually
+        # occupies.** Do not compute a centre from a part of the shape the label is not in.
+        lab(-label_x, 0.0, "IN", "IN")
         lab(0.0, 0.0, "SCC", "SCC")
-        lab(span / 2.0, half_h * 0.45, "OUT", "OUT")
+        lab(label_x, 0.0, "OUT", "OUT")
         if show_fringes:
             lab(*S["tendril_in"], "TENDRIL", "TENDRIL", S["fringe_label_size"])
             lab(*S["tendril_out"], "TENDRIL", "TENDRIL", S["fringe_label_size"])
