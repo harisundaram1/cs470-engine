@@ -16,6 +16,77 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [0.10.2] — 2026-07-14 — the blob was never in points: a frozen dpi, found only in the container
+
+### Fixed — `_points_ellipse` froze its dpi at construction (LESSONS.md F7, instance six)
+
+**The bug shipped, and every local render said it had not.** In the live PL workspace the
+bow-tie schematic's `DISCONNECTED` and `TENDRIL` labels overflowed their blobs by ~1.6x.
+Locally — dispatcher, `build.py`, `edge_audit`, `label_audit`, a bare `savefig` — they were
+enclosed at 0.80 fill. Both measurements were correct. They were measuring different worlds.
+
+`_points_ellipse` sized its ellipse with `Affine2D().scale(fig.dpi / 72)`, which **freezes
+the dpi at construction**. Text does not freeze: matplotlib scales a fontsize by the
+RENDERER's dpi at DRAW time. So the ellipse was never points-sized at all — it was
+**pixels, frozen at construction, wearing a points costume**:
+
+    effective ellipse size = w_pts * (construct_dpi / draw_dpi)
+
+and it only looked right when those two happened to be equal.
+
+**Why the container is different, and why nothing local could ever have caught it.** This
+module's own `apply_default_style()` runs
+
+    ipy.run_line_magic("config", "InlineBackend.figure_format = 'retina'")
+
+**guarded by `if get_ipython() is not None`.** In JupyterLab that fires: retina makes
+`print_figure` draw at **2x** `fig.dpi`, so the ellipse rendered at half its intended point
+size while the label stayed put. In every local context `get_ipython()` is `None`, the magic
+silently no-ops, construct dpi == draw dpi == 100, and the frozen scale is *accidentally
+right*. **The environment was an unenumerated axis.** Measured, same figure, same engine:
+
+    context     draw dpi   font          DRAWN text   ELLIPSE   ratio
+    local          100     Helvetica       72.2pt      90.3pt   0.80  enclosed
+    container      200     DejaVu Sans     78.9pt      49.7pt   1.59  OVERFLOW
+
+The fonts differ too (the container has no Helvetica) — but that is a red herring: the blob
+is sized from the extent measured in whatever face is live, so the font cancels out of the
+ratio exactly. **Only dpi drove it.**
+
+**Fixed at the cause:** the scale is now `fig.dpi_scale_trans`, matplotlib's own inches->pixels
+transform, which `Figure._set_dpi` mutates **in place** on every dpi change and therefore
+re-evaluates at draw time. Not a fudge factor — a fudge factor fixes 200 and breaks 150.
+
+### Fixed — IN / OUT sat at the lobe's AREA CENTROID, which is not its visual centre
+
+A triangle's centroid is a third of the way from its base, so on two mirrored lobes it pulled
+`IN` left and `OUT` right by `span/6` each, in opposite directions — the signature of a
+centroid, and visible on the live render as "not centred" in either lobe. A correct rule
+computing the wrong quantity: a label is centred against the shape's **extent**, which is what
+the eye bisects, not against its **mass**. Now at the midpoint of the lobe's x-extent.
+
+### Added — `tests/test_dpi_invariance.py` (B7), with a red case
+
+Sweeps the dpis a figure actually ships at (100 = inline `png`, 200 = `retina`, plus 150 so a
+2x-only fudge fails), asserts `_points_ellipse` is point-invariant and every fringe label is
+enclosed, and asserts the text/blob ratio is **font-independent** — so a local pass means
+something about the container. The red case rebuilds 0.10.1's frozen transform and proves the
+gate reds on it (100pt -> 50pt at 200dpi).
+
+### 🧨 The render-regression gate was structurally blind to this, and is now labelled
+
+`render_regression.py` saves at `dpi=100` — **the construction dpi** — so every frozen-basis
+bug cancels inside it. Had 0.10.2 fixed *only* the dpi, that gate would have reported **860/860
+byte-identical** and called the change additive. **Byte-identity answers "did the corpus move",
+not "is the unit basis sound".** Noted next to the constant; the dpi axis belongs to B7.
+
+### Render regression (v0.10.1 -> 0.10.2, 860 figures, `PYTHONHASHSEED=random`)
+
+**9 moved, all of them 6.1's bow-tie schematics** — `q_8`, `q_9`, `q_12`, and
+`concept_bowtie_explorer` in all six states. **L1-L5: 0 of 851 moved. 6.2: 0 moved.** The nine
+moved because of the IN/OUT reposition (the dpi fix is a no-op at the harness's dpi, which is
+the whole point above). Deployed L1-L5 stay on the v0.7.0 image and are untouched either way.
+
 ## [0.10.1] — 2026-07-13 — the schematic's ink-vs-data pass, and a warning that must not ship
 
 Polish on 0.10.0's `bowtie_schematic` / `stack`. **NOT tagged, NOT deployed.**

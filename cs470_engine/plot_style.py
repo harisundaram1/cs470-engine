@@ -4390,13 +4390,19 @@ def draw_bowtie_schematic(ax, *, highlight=None, show_fringes=True,
                     # "unreadably faint" hole this fix exists to climb out of.
                     alpha=1.0 if (highlight is None or role == highlight) else 0.78)
 
-        # IN and OUT sit at their lobe's CENTROID in x (a triangle's centroid is a third
-        # of the way from its base), lifted clear of the flow arrow that runs along y=0.
-        # One rule, applied to both — they used to sit outboard of their arrows, which is
-        # mirror-symmetric but reads as "not centred" in either lobe.
-        lab(-span * 2.0 / 3.0, half_h * 0.45, "IN", "IN")
+        # IN and OUT sit at the MIDPOINT OF THEIR LOBE'S X-EXTENT, lifted clear of the
+        # flow arrow that runs along y=0. One rule, both lobes, symmetric.
+        #
+        # ⚠️ NOT the area centroid. A triangle's centroid is NOT its visual centre: it sits
+        # a third of the way from the base, so for these two mirrored lobes (base outboard,
+        # apex at the core) the centroid pulls IN to the LEFT and OUT to the RIGHT — by
+        # span/6 each, in OPPOSITE directions. That is a correct rule computing the wrong
+        # quantity: a label is centred against the shape's EXTENT, which is what the eye
+        # bisects, not against its mass. The lobe spans x in [-span, 0], so the midpoint
+        # is -span/2, not -2*span/3.
+        lab(-span / 2.0, half_h * 0.45, "IN", "IN")
         lab(0.0, 0.0, "SCC", "SCC")
-        lab(span * 2.0 / 3.0, half_h * 0.45, "OUT", "OUT")
+        lab(span / 2.0, half_h * 0.45, "OUT", "OUT")
         if show_fringes:
             lab(*S["tendril_in"], "TENDRIL", "TENDRIL", S["fringe_label_size"])
             lab(*S["tendril_out"], "TENDRIL", "TENDRIL", S["fringe_label_size"])
@@ -4457,10 +4463,39 @@ def _points_ellipse(ax, xy, w_pts, h_pts, **kw):
     in a points-scaled frame and translate that frame to the data point's display
     position. The shape is then immune to the axes scale — which is the entire reason it
     can be trusted to contain a label whose size is also fixed in points.
+
+    🧨 THE SCALE MUST BE `fig.dpi_scale_trans`, NEVER `Affine2D().scale(fig.dpi / 72)`.
+    `Affine2D().scale(k)` FREEZES k at construction. Text does not: matplotlib scales a
+    fontsize by the RENDERER's dpi at DRAW time. So a frozen scale makes this ellipse
+    PIXELS-pretending-to-be-points, and the two bases silently diverge the moment the
+    draw dpi differs from the construction dpi:
+
+        effective ellipse size = w_pts * (construct_dpi / draw_dpi)
+
+    Which is not hypothetical, and is not rare — it is THE SHIPPING CONTEXT. This module's
+    own `apply_default_style()` sets `InlineBackend.figure_format = 'retina'`, and retina
+    makes `print_figure` draw at 2x `fig.dpi`. So in JupyterLab the ellipse came out at
+    HALF its intended point size while the label stayed put, and 0.10.1's bow-tie fringe
+    labels overflowed their blobs by ~1.6x in the live workspace.
+
+    It was invisible for exactly one reason: the retina magic is wrapped in
+    `if get_ipython() is not None`, so EVERY local render — the dispatcher, `build.py`,
+    `edge_audit`, `label_audit`, a bare `savefig` — has construct dpi == draw dpi and the
+    frozen scale is accidentally right. **A local PNG cannot see this bug.** Verify a
+    figure in the container, through the inline backend, or you have not verified it.
+
+    `fig.dpi_scale_trans` is matplotlib's own inches->pixels transform and `Figure._set_dpi`
+    mutates it IN PLACE on every dpi change, so composing with it re-evaluates at draw
+    time. Points -> inches (/72) -> dpi_scale_trans -> pixels -> translate to the data point.
+
+    (Lineage: 0.10.0 shipped this same defect in its DATA-units form and 0.10.1 "fixed" it
+    by moving both sides into points — but only one side actually got there. Same failure
+    class, third time: LESSONS.md F7, the wrong unit basis.)
     """
     from matplotlib.patches import Ellipse
     from matplotlib.transforms import Affine2D, ScaledTranslation
-    tr = (Affine2D().scale(ax.figure.dpi / 72.0)
+    tr = (Affine2D().scale(1.0 / 72.0)          # points -> inches
+          + ax.figure.dpi_scale_trans           # inches -> pixels, LIVE at draw time
           + ScaledTranslation(xy[0], xy[1], ax.transData))
     e = Ellipse((0, 0), w_pts, h_pts, transform=tr, **kw)
     ax.add_patch(e)

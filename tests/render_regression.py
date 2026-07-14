@@ -69,6 +69,19 @@ from cs470_engine.worksheet import Worksheet          # noqa: E402
 # Metadata carries a timestamp + a random-salted id by default; both would churn
 # the bytes on every run and make "byte-identical" unprovable.
 matplotlib.rcParams["svg.hashsalt"] = "cs470"
+#
+# 🧨 WHAT THIS GATE CANNOT SEE: dpi=100 IS THE CONSTRUCTION DPI, SO EVERY DPI BUG CANCELS.
+# This harness renders at exactly the dpi a figure is BUILT at, which makes it structurally
+# blind to any quantity whose basis is frozen at construction. That is not hypothetical:
+# 0.10.1 shipped an ellipse whose scale was frozen at `fig.dpi / 72`, so it came out at HALF
+# size under the retina inline backend (draw dpi 200) that `apply_default_style()` selects in
+# JupyterLab — and this gate would have called that change ADDITIVE, 860/860 byte-identical,
+# because at dpi == 100 the frozen scale and a live one are the same number.
+#
+# Do NOT "fix" this by raising the dpi: rebasing every hash buys one more dpi and still
+# proves nothing about the next one. Byte-identity answers "did the corpus move", not "is
+# the unit basis sound". The dpi axis is covered by `tests/test_dpi_invariance.py` (B7),
+# which sweeps the dpis the figure actually ships at and carries a red case. Run BOTH.
 SAVE = dict(format="png", dpi=100, bbox_inches="tight", metadata={"Software": None})
 
 
