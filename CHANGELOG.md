@@ -16,6 +16,135 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [0.11.0] — 2026-07-14 — probabilistic figures: distributions, sweeps, and a seeded ER sampler
+
+The engine has been **exact-rational-deterministic its whole life** — every figure a fixed
+structure rendered the same way twice. Lesson 8 (Erdős–Rényi random graphs) needs three things
+it had never done: plot a **distribution**, plot an **arbitrary x-y sweep**, and **sample a
+random graph**. This is the renderer-first pass that unblocks WS8's concept cells; no worksheet
+was authored. **There is no textbook chapter for L8** (E&K has no random-graph chapter), so for
+every number here **the derivation is the ground truth** and each helper names its theorem.
+
+### Added — `cs470_engine/random_graphs.py` — ER theory, computed EXACTLY (never sampled)
+
+Pure-`math` closed forms, each with its authority in the docstring:
+
+- `binomial_pmf(k, n, p)` = `C(n,k) p^k (1-p)^(n-k)`; `poisson_pmf(k, lam)` = `e^-lam lam^k/k!`.
+  **Exact** (`math.comb` / `math.factorial`), never a sample estimate.
+- `degree_distribution(n, p)` = `Binomial(n-1, p)` (**M4** — a node has `n-1` i.i.d. potential
+  neighbors). `binomial_series` / `poisson_series` are the plotting-ready `(k, prob)` lists.
+- `expected_degree(n, p)` = **`np`** (**M5**), `expected_edge_count` = `C(n,2)p` (**M3**).
+- `giant_component_threshold(n)` = `1/n` (**M9**, Erdős–Rényi 1960; `np = 1`),
+  `connectivity_threshold(n)` = `ln(n)/n` (**M10**, Erdős–Rényi 1959; `np = ln n`, natural log).
+- `giant_component_fraction(c)` — the flagship curve's ordinate: the giant fraction `S` solving
+  the self-consistent `S = 1 - e^{-cS}` (Poisson-branching-process survival; **M9**), by
+  bisection. `S = 0` for `c ≤ 1`, positive for `c > 1` — the knee is exactly at `np = 1`.
+- `largest_component_fraction(G)` — a **MEASURED** quantity off an actual graph, named
+  *distinctly* from the theoretical `giant_component_fraction` so a sample can never masquerade
+  as a theorem.
+
+**Convention (Hari's fixed decision):** thresholds are stated on the `np` basis. ER theory
+lives in the `n→∞` limit, where `np` and the exact finite-n mean `(n-1)p` coincide; the
+`1/n` vs `1/(n-1)` gap is an `O(p)` finite-n artifact, **not** a real distinction in this
+regime. `expected_degree` returns `np`; its docstring reconciles that with the exact
+`(n-1)p` mean of the degree distribution it also computes, so the two are never silently
+inconsistent (the degree-dist mean IS `(n-1)p` — asserted in the tests).
+
+### Added — `plot_style.draw_distribution` (R1) and `draw_xy_curve` (R2)
+
+The engine's **first histogram/bar and first arbitrary line chart** — every prior `ax.plot`
+was welded to an auction formula. Both are **domain-agnostic**: they take already-computed
+`(x, y)` data and only DRAW it (bars for the reference pmf, stem+markers for an overlaid limit
+law; lines + labeled threshold verticals for a sweep). Keeping compute out of the renderer is
+what lets a test assert *the bars ARE the pmf*. Round-trip through `apply_ax_style` like every
+other axes. New `DISTRIBUTION_STYLE` dict; palette pulled from `COLORS`.
+
+### Added — dispatch kinds `distribution` and `xy_curve` (`problems.py`)
+
+`compute:` asks for the CONCEPT and the dispatch runs the exact helper (same anti-drift rule as
+the L6 `node_values`): `{dist: degree|binomial|poisson, …}` for a pmf overlay; `{curve:
+giant_fraction, n, p_min, p_max, points}` + `thresholds: [giant, connectivity]` for the
+phase-transition curve (verticals derived from the threshold helpers, not typed). Explicit
+`series:` / `curves:` accepted for the literal case. Both kinds are **fail-loudly** — an unknown
+key raises (`_check_figure_keys`), and the unknown-*kind* message lists them.
+
+### Added — `random_graphs.sample_gnp(n, p, seed)` — the seeded ER sampler (optional concept only)
+
+`G(n, p)`: each of the `C(n,2)` pairs present independently w.p. `p` (**M1** — G(n,p), *not*
+G(n,m)). The code is the model literally: it draws **one uniform per `C(n,2)` pair** in fixed
+upper-triangle order (`np.triu_indices`, `== itertools.combinations(range(n), 2)`) and includes
+`(u,v)` iff its draw is `< p`.
+
+**RNG — the whole ballgame for a sampled figure.** A numpy `Generator` over an **explicit
+`PCG64` bit generator** seeded from the integer `seed`. numpy's stream-compatibility policy
+guarantees a given BitGenerator + SeedSequence yields the **same stream across numpy versions**,
+so the same seed gives the **same edge list byte-for-byte** on the laptop and in the container.
+It does **not** delegate to `networkx.gnp_random_graph` — that is G(n,p) too (confirmed:
+`nx.erdos_renyi_graph IS nx.gnp_random_graph`), but it seeds off Python's `random` via
+`@py_random_state` and its internals can shift across networkx versions; owning the draw makes
+reproducibility depend only on the pinned numpy bit generator. `seed` is a **required int** — no
+seeding off time/hash/PID (that would break byte-identity). This is the same class of bug as
+0.10.1's frozen-dpi ellipse: correct locally, potentially wrong in the container — so it was
+**proven in the container, not assumed** (below).
+
+### New dependency — `numpy` (for the sampler only; R1/R2 need none)
+
+**R1/R2 — the distributions and sweep curves — are EXACT computations, not sampled estimates:**
+`binomial_pmf`/`poisson_pmf`/`giant_component_fraction` are closed forms in pure `math`. **numpy
+is imported lazily *inside* `sample_gnp` only** — the sole capability that draws — so a worksheet
+plotting only distributions and curves pulls in no RNG dependency at all.
+
+Declared in `pyproject`. **Adds no package to the deployed image** — the base
+`prairielearn/workspace-jupyterlab-python` conda env already carries numpy (2.4.4). Confirmed
+in a locally-built v0.11.0 image: engine imports, **numpy imports under `python -s`** (the
+kernel's path, no user site — invariant #4), and **exactly one kernel** stays registered
+(GATE 1 — numpy is a library, not a kernel).
+
+### Container-reproducibility proof (the dpi lesson: a local render is not evidence)
+
+Built the working-tree engine into `cs470-workspace:v0.11.0-test` (same base + root-install
+discipline as the production Dockerfile). Then:
+
+- **Sampler byte-identity, real `sample_gnp`, 4 cases** `(50,.06,470)`, `(20,.20,7)`,
+  `(100,.03,2026)`, `(8,.5,1)`: the sorted-edge-list sha256 is **identical local (numpy 2.4.3)
+  vs container (numpy 2.4.4)** for all four. (The PNG cannot be byte-identical across
+  environments — Helvetica local, DejaVu in the image — so the proof is at the RNG/edge-list
+  level, which is exactly the stability question.)
+- **Eyeballed all three capabilities IN THE CONTAINER** (DejaVu, rendered at retina 200 dpi):
+  the degree histogram, the binomial→Poisson overlay (bars **visibly converge** onto the Poisson
+  stems as `n` grows at fixed `λ=3`: badly off at `n=6`, hugging at `n=50`), and the
+  phase-transition curve (**knee exactly at `p=1/n=0.02`**, connectivity vertical at `ln50/50`,
+  range straddling both). The plotters use no construction-time-frozen dpi quantity (all
+  points/data based), so layout is dpi-invariant by construction.
+- The new test suite **passes in the container** too (12/12).
+
+### Testing — value-level gates for the non-node-link figures + red cases
+
+`tests/test_random_graphs.py` (12 tests, plain asserts):
+
+- **COMPUTE**: pmfs normalize to 1; known exact values (q12 `P(deg=2)=0.302`; q16 `e^-2=0.135`
+  ≠ 0; T5 `Poisson(2)=0.271`); degree-dist mean `=(n-1)p`; thresholds `0.02` / `0.0782`; giant
+  fraction satisfies the fixed point and knees at `c=1`.
+- **THE FIGURE SHOWS WHAT THE MATH SAYS** — `edge_audit`/`label_audit` are node-link auditors
+  and **cannot see** a bar chart or a line plot; the byte-identity harness only proves a figure
+  did not *move*. So the right gate is **value-level**: render through the real dispatch, pull
+  the drawn bar heights / marker ordinates / curve `y` back off the Matplotlib artists, and
+  assert they equal the `random_graphs` pmf/curve to 1e-9. Each carries a **RED CASE** (compare
+  against a perturbed pmf / a shifted knee — the assert must fail), proving the gate can fail.
+- **SAMPLER**: same-seed determinism; it IS G(n,p) not G(n,m) (edge count varies across seeds;
+  `p=0`→empty, `p=1`→complete); the seed contract (non-int raises); n/p red cases.
+
+### Render regression (0.10.3 → 0.11.0, 969 figures, `PYTHONHASHSEED=random`, ×2)
+
+**0 of 969 moved.** L1–L7 render **byte-identical** to 0.10.3 (`plot_style.__file__` asserted
+against the working tree; baseline and after each captured twice at random hashseed and
+self-identical). This pass is purely **additive** — new modules and new dispatch branches, no
+existing path touched. `ENGINE_SYMBOLS` in the redesign repo gained the 14 new public helpers;
+its drift test is green.
+
+**Not tagged, imaged, or deployed** — engine code + `pyproject` are at 0.11.0; the release
+(tag → `--no-cache` image build → deploy) is a separate step.
+
 ## [0.10.3] — 2026-07-14 — IN / OUT, placed against the space they actually occupy
 
 ### Fixed — the bow-tie's lobe labels were centred against a row they were not sitting in

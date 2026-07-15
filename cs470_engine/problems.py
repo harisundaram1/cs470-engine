@@ -472,6 +472,172 @@ def _render_bipartite_market(figure_spec: dict) -> None:
     plt.close(fig)
 
 
+def _build_distribution_series(compute):
+    """Turn a ``distribution`` ``compute:`` spec into plotting-ready pmf series.
+
+    ``compute`` is a list of series specs, each a dict:
+      * ``{dist: degree, n, p}``    -> the degree law ``Binomial(n-1, p)`` (M4)
+      * ``{dist: binomial, trials, p}`` -> a raw ``Binomial(trials, p)`` (M2)
+      * ``{dist: poisson, lam[, k_max]}`` -> the Poisson limit ``Poisson(lam)`` (M6)
+    plus an optional ``label``. Every value comes from the EXACT ``random_graphs``
+    pmf, never a literal. The Poisson support is unbounded, so a ``poisson`` series
+    with no ``k_max`` borrows the widest binomial/degree support in the SAME list
+    (so an overlay lines up value-for-value); a lone Poisson must give ``k_max``.
+    """
+    from . import random_graphs as rg
+
+    kmaxes = []
+    for c in compute:
+        d = c.get("dist")
+        if d == "degree":
+            kmaxes.append(c.get("k_max", c["n"] - 1))
+        elif d == "binomial":
+            kmaxes.append(c.get("k_max", c["trials"]))
+    common_kmax = max(kmaxes) if kmaxes else None
+
+    series, labels = [], []
+    for c in compute:
+        d = c.get("dist")
+        km = c.get("k_max", common_kmax)
+        if d == "degree":
+            s = rg.degree_distribution(c["n"], c["p"], k_max=km)
+        elif d == "binomial":
+            s = rg.binomial_series(c["trials"], c["p"], k_max=km)
+        elif d == "poisson":
+            if km is None:
+                raise ValueError(
+                    "distribution compute: a lone 'poisson' series needs an "
+                    "explicit 'k_max' (its support is unbounded). Add k_max, or "
+                    "pair it with a binomial/degree series to borrow the range.")
+            s = rg.poisson_series(c["lam"], km)
+        else:
+            raise ValueError(
+                f"distribution compute: unknown dist {d!r}. Known: 'degree' "
+                f"(Binomial(n-1,p)), 'binomial' (trials,p), 'poisson' (lam).")
+        series.append(s)
+        labels.append(c.get("label"))
+    return series, labels
+
+
+def _render_distribution(figure_spec: dict) -> None:
+    """Render a ``kind: distribution`` figure — a discrete pmf plot (R1).
+
+    Prefers ``compute:`` (derive the pmf from the exact formula); accepts an
+    explicit ``series:`` for the literal case. Values are handed to
+    ``draw_distribution`` verbatim, so a value-level test can assert the drawn
+    bars equal the computed pmf.
+    """
+    from . import plot_style as ps
+
+    compute = figure_spec.get("compute")
+    explicit = figure_spec.get("series")
+    if compute is not None:
+        series, labels = _build_distribution_series(compute)
+    elif explicit is not None:
+        series = [[tuple(pt) for pt in s] for s in explicit]
+        labels = figure_spec.get("labels")
+    else:
+        raise ValueError("distribution figure needs `compute:` or `series:`.")
+
+    figsize = tuple(figure_spec.get("figsize", (6.2, 3.8)))
+    fig, ax = plt.subplots(figsize=figsize)
+    ps.draw_distribution(
+        ax, series,
+        labels=labels,
+        x_label=figure_spec.get("x_label", "value"),
+        y_label=figure_spec.get("y_label", "probability"),
+        title=figure_spec.get("title"),
+        note=figure_spec.get("note"),
+        x_ticks=figure_spec.get("x_ticks", True),
+    )
+    plt.tight_layout()
+    display(fig)
+    plt.close(fig)
+
+
+def _build_xy_curves(figure_spec: dict):
+    """Turn an ``xy_curve`` spec into ``(curves, vlines)`` for ``draw_xy_curve``.
+
+    With ``compute:`` the curve is DERIVED from ER theory:
+      * ``curve: giant_fraction`` -> the giant-component fraction ``S`` vs ``p``
+        over ``[p_min, p_max]`` at ``points`` samples for ``n`` nodes, from
+        ``giant_component_fraction(expected_degree(n, p))`` (M9). ``x_axis: p``
+        (default) plots vs edge probability; ``mean_degree`` plots vs ``np``.
+    ``thresholds: [giant, connectivity]`` become labeled reference verticals from
+    ``giant_component_threshold(n)`` / ``connectivity_threshold(n)`` — so the
+    flagship curve's knee at ``np = 1`` is marked, not asserted. Explicit
+    ``curves:`` / ``vlines:`` are accepted for the literal case.
+    """
+    from . import random_graphs as rg
+
+    compute = figure_spec.get("compute")
+    if compute is None:
+        return figure_spec.get("curves") or [], figure_spec.get("vlines") or []
+
+    which = compute.get("curve")
+    if which != "giant_fraction":
+        raise ValueError(
+            f"xy_curve compute: unknown curve {which!r}. Known: 'giant_fraction'.")
+    n = compute["n"]
+    p_min = compute.get("p_min", 0.0)
+    p_max = compute["p_max"]
+    pts = compute.get("points", 200)
+    x_axis = compute.get("x_axis", "p")
+    if pts < 2:
+        raise ValueError("xy_curve compute: 'points' must be >= 2.")
+    ps_grid = [p_min + (p_max - p_min) * i / (pts - 1) for i in range(pts)]
+    ys = [rg.giant_component_fraction(rg.expected_degree(n, p)) for p in ps_grid]
+    if x_axis == "mean_degree":
+        xs = [rg.expected_degree(n, p) for p in ps_grid]
+    elif x_axis == "p":
+        xs = ps_grid
+    else:
+        raise ValueError(
+            f"xy_curve compute: unknown x_axis {x_axis!r}. Known: 'p', "
+            f"'mean_degree'.")
+    curves = [{"x": xs, "y": ys, "label": compute.get("label")}]
+
+    # Thresholds -> labeled reference verticals, positioned in the chosen x-axis.
+    _THRESH = {
+        "giant": (rg.giant_component_threshold, "giant comp: $np=1$"),
+        "connectivity": (rg.connectivity_threshold, "connected: $np=\\ln n$"),
+    }
+    vlines = []
+    for name in (figure_spec.get("thresholds") or []):
+        if name not in _THRESH:
+            raise ValueError(
+                f"xy_curve: unknown threshold {name!r}. Known: "
+                f"{', '.join(sorted(_THRESH))}.")
+        fn, label = _THRESH[name]
+        p_thr = fn(n)
+        vx = p_thr if x_axis == "p" else rg.expected_degree(n, p_thr)
+        vlines.append({"x": vx, "label": label})
+    return curves, vlines
+
+
+def _render_xy_curve(figure_spec: dict) -> None:
+    """Render a ``kind: xy_curve`` figure — a metric-vs-parameter sweep (R2)."""
+    from . import plot_style as ps
+
+    curves, vlines = _build_xy_curves(figure_spec)
+    if not curves:
+        raise ValueError("xy_curve figure needs `compute:` or `curves:`.")
+    figsize = tuple(figure_spec.get("figsize", (6.2, 3.8)))
+    fig, ax = plt.subplots(figsize=figsize)
+    ps.draw_xy_curve(
+        ax, curves,
+        x_label=figure_spec.get("x_label", "x"),
+        y_label=figure_spec.get("y_label", "y"),
+        title=figure_spec.get("title"),
+        note=figure_spec.get("note"),
+        vlines=vlines,
+        y_lim=figure_spec.get("y_lim"),
+    )
+    plt.tight_layout()
+    display(fig)
+    plt.close(fig)
+
+
 def _exchange_num(v):
     """Coerce a YAML value / fraction-string to a float for the bargaining
     helpers. ``"1/3"`` -> 0.333…, ``Fraction`` / int / float -> float. (The
@@ -670,6 +836,17 @@ _FIGURE_KEYS = {
     # Two or more figures, stacked vertically, as ONE figure.
     "stack":             frozenset({"kind", "ref", "figures", "ratios", "width",
                                     "panel_height", "hspace"}),
+    # Lesson-8 probabilistic figures (v0.11.0). A discrete-pmf plot and an x-y
+    # sweep chart. `compute:` asks for the CONCEPT (a binomial/Poisson pmf, the
+    # giant-component curve) and the dispatch runs the exact `random_graphs`
+    # helper — same anti-drift rule as the Lesson-6 node_values. `series:` /
+    # `curves:` accept explicit data for the rare literal case.
+    "distribution":      frozenset({"kind", "ref", "compute", "series", "labels",
+                                    "x_label", "y_label", "title", "note",
+                                    "figsize", "x_ticks"}),
+    "xy_curve":          frozenset({"kind", "ref", "compute", "curves", "vlines",
+                                    "thresholds", "x_label", "y_label", "title",
+                                    "note", "figsize", "y_lim"}),
 }
 
 
@@ -1224,11 +1401,21 @@ def _render_figure(ws, figure_spec: dict) -> None:
     if kind == "stack":
         _render_stack(figure_spec)
         return
+    if kind == "distribution":
+        _check_figure_keys(kind, figure_spec, _FIGURE_KEYS[kind],
+                           "draw_distribution")
+        _render_distribution(figure_spec)
+        return
+    if kind == "xy_curve":
+        _check_figure_keys(kind, figure_spec, _FIGURE_KEYS[kind],
+                           "draw_xy_curve")
+        _render_xy_curve(figure_spec)
+        return
     if kind != "graph":
         raise ValueError(
             f"unknown figure kind {kind!r}. Known: 'graph', 'image', "
             f"'payoff_matrix', 'bipartite_market', 'matrix', 'iteration_table', "
-            f"'bowtie_schematic', 'stack', "
+            f"'bowtie_schematic', 'stack', 'distribution', 'xy_curve', "
             f"{', '.join(repr(k) for k in sorted(_AUCTION_KINDS))}. "
             f"(This used to print a note and render nothing.)")
 

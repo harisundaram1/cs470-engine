@@ -2995,6 +2995,174 @@ def draw_common_value_bids(ax, *, common_value, estimates, note=None):
 
 
 # -----------------------------------------------------------------------------
+# Probabilistic-figure renderers (Lesson 8, Erdős–Rényi) — v0.11.0
+# -----------------------------------------------------------------------------
+#
+# Two GENERAL plotters that take already-computed data and only DRAW it: a
+# discrete-pmf plot (R1) and an x-y sweep chart (R2). They are deliberately
+# domain-agnostic — they know nothing about ER theory. The caller (the YAML
+# dispatch, or a concept cell) computes the pmf / curve values from the exact
+# formulas in ``random_graphs`` and hands them here as plain ``(x, y)`` pairs.
+# Keeping compute out of the renderer is what lets a value-level test assert the
+# BARS MATCH THE PMF: the numbers on the axes are exactly the numbers the theory
+# produced, because the renderer added none of its own.
+#
+# These are the engine's first histogram/bar and first arbitrary line chart —
+# every prior ``ax.plot`` was welded to an auction formula. They round-trip
+# through ``apply_ax_style`` like every other axes the project draws.
+
+#: Styling for the distribution / sweep renderers. Bars = the reference law
+#: (binomial degree distribution); stems = an overlaid limit law (Poisson).
+DISTRIBUTION_STYLE = {
+    "bar_color":       COLORS["tertiary"],      # sky blue — the reference pmf
+    "bar_alpha":       0.85,
+    "bar_edge_color":  COLORS["primary"],
+    "bar_edge_width":  1.0,
+    "bar_width":       0.82,
+    "stem_color":      COLORS["accent"],        # orange — the overlaid limit law
+    "stem_width":      2.0,
+    "stem_marker":     "o",
+    "stem_markersize": 7,
+    "curve_color":     COLORS["primary"],
+    "curve_width":     2.4,
+    "vline_color":     COLORS["accent"],
+    "vline_width":     1.6,
+    "axis_fontsize":   11,
+    "annot_fontsize":  10,
+    "legend_fontsize": 10,
+}
+
+#: A small palette for additional x-y curves beyond the first (first uses
+#: ``curve_color``). Kept distinct from ENTITY_COLORS so a sweep's extra series
+#: read as curves, not categories.
+_XY_CURVE_COLORS = [COLORS["primary"], COLORS["accent"], COLORS["good"],
+                    COLORS["quaternary"]]
+
+
+def draw_distribution(ax, series, *, labels=None, x_label="value",
+                      y_label="probability", title=None, note=None,
+                      x_ticks=True):
+    """Plot one or more discrete pmfs on shared axes (R1).
+
+    ``series``: a list of series, each a list of integer-``x`` ``(x, prob)``
+    pairs. The FIRST series is drawn as BARS (the reference law — e.g. the
+    binomial degree distribution); every further series is drawn as a STEM +
+    MARKER overlay (e.g. the Poisson limit), so the law-of-rare-events
+    convergence is one picture: bars and stems coincide more closely as ``n``
+    grows at fixed ``lam``. A single series (no overlay) is the plain
+    degree-distribution histogram.
+
+    This function ONLY draws — the ``prob`` values are computed by the caller
+    from the exact pmf (``random_graphs.binomial_pmf`` / ``poisson_pmf``); it
+    plots them verbatim. ``labels`` (one per series) drives a legend.
+
+    Returns the ``(x, y)`` data actually plotted per series, so a value-level
+    test can assert the drawn heights equal the computed pmf.
+    """
+    st = DISTRIBUTION_STYLE
+    apply_ax_style(ax)
+    if series and isinstance(series[0], (int, float)):
+        raise ValueError("draw_distribution: `series` must be a LIST OF series "
+                         "(each a list of (x, prob) pairs), even for one pmf.")
+    labels = labels or [None] * len(series)
+    drawn = []
+    all_x = []
+    for idx, s in enumerate(series):
+        xs = [x for x, _ in s]
+        ys = [y for _, y in s]
+        all_x.extend(xs)
+        drawn.append((xs, ys))
+        if idx == 0:
+            ax.bar(xs, ys, width=st["bar_width"], color=st["bar_color"],
+                   alpha=st["bar_alpha"], edgecolor=st["bar_edge_color"],
+                   linewidth=st["bar_edge_width"], label=labels[idx], zorder=2)
+        else:
+            # Stem overlay: a vertical line to each marker (a pmf is discrete, so
+            # a connecting LINE would misread as a continuous density).
+            ax.vlines(xs, 0, ys, color=st["stem_color"],
+                      linewidth=st["stem_width"], zorder=3)
+            ax.plot(xs, ys, linestyle="none", marker=st["stem_marker"],
+                    markersize=st["stem_markersize"], markerfacecolor="white",
+                    markeredgecolor=st["stem_color"], markeredgewidth=2.0,
+                    label=labels[idx], zorder=4)
+    ax.set_xlabel(x_label, fontsize=st["axis_fontsize"])
+    ax.set_ylabel(y_label, fontsize=st["axis_fontsize"])
+    ax.set_ylim(bottom=0)
+    if x_ticks and all_x:
+        lo, hi = min(all_x), max(all_x)
+        # At most ~15 integer ticks so a wide support stays legible.
+        step = max(1, (hi - lo) // 15 + 1)
+        ax.set_xticks(list(range(lo, hi + 1, step)))
+    if any(l is not None for l in labels):
+        ax.legend(fontsize=st["legend_fontsize"], frameon=False)
+    cap = note or title
+    if cap:
+        ax.set_title(cap, fontsize=st["annot_fontsize"], color=COLORS["text"])
+    return drawn
+
+
+def draw_xy_curve(ax, curves, *, x_label="x", y_label="y", title=None,
+                  note=None, vlines=None, y_lim=None):
+    """Plot one or more ``(x, y)`` line series — a general metric-vs-parameter
+    sweep chart (R2).
+
+    ``curves``: a list of series. Each is either a ``(xs, ys)`` pair or a dict
+    ``{"x": [...], "y": [...], "label": str, "color": str, "linestyle": str,
+    "marker": str}``. ``vlines``: optional list of ``{"x": float, "label": str,
+    "color": str, "linestyle": str}`` reference verticals (e.g. a threshold
+    ``p = 1/n``). The caller supplies the arrays — for the phase-transition curve
+    they come from ``giant_component_fraction`` over a ``p``-range; this only
+    draws.
+
+    Returns the ``(x, y)`` data plotted per curve for value-level testing.
+    """
+    st = DISTRIBUTION_STYLE
+    apply_ax_style(ax)
+    if curves and isinstance(curves[0], (int, float)):
+        raise ValueError("draw_xy_curve: `curves` must be a LIST OF series, even "
+                         "for one curve (each a (xs, ys) pair or a dict).")
+    drawn = []
+    have_label = False
+    for idx, c in enumerate(curves):
+        if isinstance(c, dict):
+            xs, ys = c["x"], c["y"]
+            color = c.get("color", _XY_CURVE_COLORS[idx % len(_XY_CURVE_COLORS)])
+            ls = c.get("linestyle", "-")
+            marker = c.get("marker", None)
+            label = c.get("label")
+        else:
+            xs, ys = c
+            color = _XY_CURVE_COLORS[idx % len(_XY_CURVE_COLORS)]
+            ls, marker, label = "-", None, None
+        drawn.append((list(xs), list(ys)))
+        have_label = have_label or (label is not None)
+        ax.plot(xs, ys, color=color, linewidth=st["curve_width"], linestyle=ls,
+                marker=marker, markersize=7, markerfacecolor="white",
+                markeredgecolor=color, markeredgewidth=2, label=label, zorder=3)
+    for v in (vlines or []):
+        vx = v["x"] if isinstance(v, dict) else v
+        vcolor = v.get("color", st["vline_color"]) if isinstance(v, dict) else st["vline_color"]
+        vls = v.get("linestyle", "--") if isinstance(v, dict) else "--"
+        ax.axvline(vx, color=vcolor, linewidth=st["vline_width"], linestyle=vls,
+                   zorder=1)
+        vlabel = v.get("label") if isinstance(v, dict) else None
+        if vlabel:
+            ax.text(vx, ax.get_ylim()[1], f" {vlabel}", rotation=90,
+                    va="top", ha="left", color=vcolor,
+                    fontsize=st["annot_fontsize"])
+    ax.set_xlabel(x_label, fontsize=st["axis_fontsize"])
+    ax.set_ylabel(y_label, fontsize=st["axis_fontsize"])
+    if y_lim is not None:
+        ax.set_ylim(*y_lim)
+    if have_label:
+        ax.legend(fontsize=st["legend_fontsize"], frameon=False)
+    cap = note or title
+    if cap:
+        ax.set_title(cap, fontsize=st["annot_fontsize"], color=COLORS["text"])
+    return drawn
+
+
+# -----------------------------------------------------------------------------
 # Matching-market helpers + renderer (Lesson 4, c10)
 # -----------------------------------------------------------------------------
 #
