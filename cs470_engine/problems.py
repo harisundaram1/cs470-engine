@@ -632,6 +632,9 @@ def _render_xy_curve(figure_spec: dict) -> None:
         note=figure_spec.get("note"),
         vlines=vlines,
         y_lim=figure_spec.get("y_lim"),
+        xscale=figure_spec.get("xscale", "linear"),      # R1
+        yscale=figure_spec.get("yscale", "linear"),      # R1
+        slope_annotation=figure_spec.get("slope_annotation"),
     )
     plt.tight_layout()
     display(fig)
@@ -726,6 +729,18 @@ def _resolve_graph_annotations(figure_spec: dict, G) -> dict:
         }
 
     return {
+        # X2 (F9 — the 0.8.0 directed-path fix, re-landed in its undirected
+        # sibling): `node_size` and `show_labels` were ALLOWLISTED by
+        # `_GRAPH_KEYS_COMMON` but NOT returned here, so `_check_figure_keys`
+        # passed and the value SILENTLY EVAPORATED before `draw_graph` — an author
+        # who set `node_size: 320` on an undirected spec got the default and no
+        # error (it cost er20_p006 a figure in L8). Forward them here; both draw_*
+        # branches now honor both (asserted in tests/test_undirected_forwarding.py).
+        "node_size": figure_spec.get("node_size"),
+        "show_labels": bool(figure_spec.get("show_labels", True)),
+        # node-6 fix (opt-in). Default off => byte-identical for the deployed
+        # corpus; Lesson-8/9 undirected specs set `frame_nodes: true`.
+        "frame_nodes": bool(figure_spec.get("frame_nodes", False)),
         "highlight_nodes": highlight_nodes,
         "highlight_edges": highlight_edges,
         "matched_edges": matched_edges,
@@ -765,6 +780,9 @@ _GRAPH_KEYS_COMMON = frozenset({
 # directed spec that names one is a mistake worth raising on.
 _GRAPH_KEYS_UNDIRECTED = frozenset({
     "matching", "matched_edges", "outside_options", "pendant_stub", "edge_styles",
+    # node-6 fix (v0.11.1): the per-axis node-framing pad, opt-in. Undirected-only
+    # — the directed path already frames via `frame_signed_axes` and never clips.
+    "frame_nodes",
 })
 _GRAPH_KEYS_DIRECTED = frozenset({
     "highlight_color", "node_values_below", "value_caption", "below_caption",
@@ -841,12 +859,19 @@ _FIGURE_KEYS = {
     # giant-component curve) and the dispatch runs the exact `random_graphs`
     # helper — same anti-drift rule as the Lesson-6 node_values. `series:` /
     # `curves:` accept explicit data for the rare literal case.
+    # `distribution` deliberately does NOT allow `xscale`/`yscale` (§2.2/X1): its
+    # bars and stems are anchored at y=0, so a log axis is a silent-wrong-artifact
+    # trap — `draw_distribution` RAISES on one. Do NOT add the keys here "for
+    # symmetry" with xy_curve; the asymmetry is correct. A log pmf uses xy_curve.
     "distribution":      frozenset({"kind", "ref", "compute", "series", "labels",
                                     "x_label", "y_label", "title", "note",
                                     "figsize", "x_ticks"}),
+    # `xscale`/`yscale` (R1, v0.11.1) — log axes, xy_curve ONLY. `slope_annotation`
+    # (option ②) draws the true slope on a log-log line.
     "xy_curve":          frozenset({"kind", "ref", "compute", "curves", "vlines",
                                     "thresholds", "x_label", "y_label", "title",
-                                    "note", "figsize", "y_lim"}),
+                                    "note", "figsize", "y_lim",
+                                    "xscale", "yscale", "slope_annotation"}),
 }
 
 

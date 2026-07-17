@@ -219,7 +219,12 @@ def render_concept(ws, section: dict) -> None:
             [fig_out],
             layout=widgets.Layout(width="58%"),
         )
-        display(widgets.HBox([left, right]))
+        # align_items="flex-start": without it the HBox falls back to CSS
+        # `align-items: stretch`, so the shorter column stretches to the taller
+        # one and the figure floats above a block of dead space. Top-align both
+        # columns. LAYOUT-only — perturbs no matplotlib figure's byte-identity.
+        display(widgets.HBox([left, right],
+                             layout=widgets.Layout(align_items="flex-start")))
     elif layout_kind == "figure_left":
         left = widgets.VBox(
             [fig_out],
@@ -229,7 +234,9 @@ def render_concept(ws, section: dict) -> None:
             control_widgets + [caption_out],
             layout=widgets.Layout(width="40%"),
         )
-        display(widgets.HBox([left, right]))
+        # align_items="flex-start" — see the narration_left branch above.
+        display(widgets.HBox([left, right],
+                             layout=widgets.Layout(align_items="flex-start")))
     else:  # single_column
         if control_widgets:
             display(widgets.VBox(control_widgets))

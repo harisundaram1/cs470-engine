@@ -16,6 +16,111 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [0.11.1] — 2026-07-17 — Lesson 9 power laws: log axes, the heavy-tail compute layer, and a semantic container gate
+
+The engine pass that serves **both L8's deploy and L9's authoring**, cut as one release. L9 needs
+the chapter's visual signature — the **log-log power law** — plus the biased-estimator lesson and a
+gate that finally renders in the container. Built against the read-only diagnostic
+(`L9_ENGINE_PASS_2_DIAGNOSTIC.md`); where the spec and the code disagreed, the code won (three
+corrections recorded below). **Not tagged/imaged/deployed** — Hari verifies first.
+
+### Added — `random_graphs.py` — the Lesson-9 heavy-tail layer (C1 + C3)
+
+- **C1 closed forms** (exact, each naming its E&K authority): `power_law_series(alpha, k_min, k_max)`
+  (normalized `P(k) ∝ k^{-α}`; a log-log fit reads slope −α exactly), `power_law_ccdf` (`k^{-(α−1)}`,
+  §18.7 Eq 18.4), `exponent_from_p(p) = 1 + 1/(1−p)` (§18.7; docstring warns of the **p=½ collapse** —
+  `1+1/(1−p)` and `1+1/p` are both 3.0 there).
+- **C3 — the biased α-estimator, TWO distinct mechanisms** (do NOT conflate — a diagnostic
+  correction): `alpha_mle` (Clauset 2009 discrete Hill) and `alpha_naive_lsq` (deliberately
+  uncorrected — the equal-weighted, empty-bin-dropping LSQ *is* the bug; the docstring is load-bearing).
+  - **Figure A — CURVATURE / body bias, present at INFINITE data.** `ek_stationary_indegree(p, k_max)`
+    is the EXACT E&K §18.3 rate-equation recurrence (no sampler). `alpha_mle` on it @ k_min=5 reads
+    **2.57** (truth 3.0), @50 → 3.0, and is **invariant to the tail cap** — so it is a distribution
+    property, not sampling noise. *(The spec called 2.57 "finite-sample estimation bias." Measurement
+    refutes that: sample and exact MLE@5 agree to 0.01. It is curvature.)*
+  - **Figure B — FINITE-SAMPLE bias.** `ek_copy_indegree_counts(n, p, seed)` is a deterministic
+    PCG64-seeded E&K copy-model sampler (the `sample_gnp` discipline; byte-reproducible local↔container).
+    Its **frozen, committed** count-table (`data/ek_copy_indegree_p50_seed7_n400000.json`, loaded via
+    `frozen_c3_indegree_counts`) makes the naive LSQ **diverge 1.93 → 0.88** as k_min 5→50 — which the
+    exact form does NOT show. No live sampler at render time (L9 decision Q2); identity pinned by
+    `C3_FROZEN_SAMPLE`'s sha256 and a regeneration test.
+
+### Fixed — `random_graphs.poisson_pmf` — the `k ≥ 171` OverflowError (REQUIRED for F2)
+
+`exp(-lam)·lam**k / factorial(k)` raised at **exactly k=171** (`factorial(171)` > float max), so
+`poisson_series(3.0, 1000)` — L9's Poisson-vs-power-law tail — could not be drawn. Now computed in
+**log space** (`exp(k·ln λ − λ − lgamma(k+1))`): underflows smoothly toward 0 (1.68e-281 at k=200)
+instead of raising, and reproduces every correct k≤170 value to < 2e-13 relative (asserted — the fix
+moves no correct value).
+
+### Added — `plot_style.draw_xy_curve` — R1: log axes + the slope primitive
+
+- `xscale` / `yscale` params (`"linear"` default → **byte-additive**; `"log"`; anything else RAISES —
+  0.8.0 fail-loudly). Log axes get decade majors + a light minor grid; `_FIGURE_KEYS["xy_curve"]`
+  gains the two keys (`distribution` deliberately does NOT — see below).
+- **§2.3 ORDERING CONSTRAINT** (measured): the scale is set **immediately after `apply_ax_style`,
+  before** the plot and the vline-label block, so the vline label's live `get_ylim()[1]` read lands at
+  the **log** top, not frozen at the linear top (F7). Verified.
+- `slope_annotation(ax, slope, *, x0, x1, …)` — a rise/run triangle whose vertices are computed in
+  **log space**, so the drawn hypotenuse's measured slope IS `slope` to floating precision (0.0e0 error
+  at α=2.1 and 3.0). Requires log-log axes (raises otherwise). Wired as an `xy_curve` key.
+
+### Added — `plot_style.frame_nodes_anisotropic` + `draw_graph(frame_nodes=…)` — the node-6 fix (OPT-IN)
+
+Per-axis pad so every node circle clears the frame, keeping `aspect='auto'` (NOT a `frame_signed_axes`
+unification). node-6's real cause (F4(e) re-derived) is **aspect ANISOTROPY** — matplotlib budgets the
+isotropic x-radius, but the marker's data half-HEIGHT is larger, leaving ~6px vertical clearance that
+tips into a clip under compression / container metrics. The pad lifts node-6 to **~34px** and converts
+the compressed-figsize clips (−4px) to +12px.
+
+> **⚠ OPT-IN, default off — and this is a STOP-decision for Hari, not a settled default.** Measurement
+> refuted the diagnostic's blast-radius prediction: an unconditional robust-clearance fix does NOT move
+> "only near-clipping L8 figures." **Deployed L1 `ties_triads` (nodes at ~1px) and L5 (~7px) are
+> tighter than L8's node-6 (6px)**, so any general fix reaching node-6 reaches them too. Default-off
+> keeps the deployed corpus byte-identical; L8/L9 opt in via `frame_nodes: true`. Whether to keep it
+> opt-in or make it default-on (which re-renders + re-verifies deployed L1/L5) is Hari's call.
+
+### Fixed — `draw_distribution` RAISES on a log axis (X1); undirected `node_size`/`show_labels` (X2)
+
+- **X1**: `draw_distribution` now raises on a log axis rather than silently mis-drawing. Its bars/stems
+  have **three** y=0 anchors (`set_ylim`, `ax.bar` baseline, `ax.vlines`), so a log axis is a
+  silent-wrong-artifact trap; nothing in L9 needs it (every log figure routes through `xy_curve`).
+- **X2** (F9/F8 — the 0.8.0 directed fix, re-landed in its undirected sibling): `node_size` /
+  `show_labels` were allowlisted but **dropped** by the undirected resolver, so they silently
+  evaporated (cost er20_p006 a figure). Now forwarded; a test asserts **both** graph paths honor both,
+  so it cannot re-land a third time.
+
+### Fixed — `concept.py` two-column layout — `align_items="flex-start"`
+
+Both two-column HBoxes now top-align their columns instead of stretching the shorter to the taller
+(the figure-above-dead-space gap). Layout-only — perturbs no figure's byte-identity.
+
+### Added — `tests/container_gate/` — the SEMANTIC container-render gate (G1)
+
+Runs the L8/L9 log figure invariants through a real kernel (`nbconvert --execute`), NOT a pixel diff.
+**Precondition the spec omitted, load-bearing**: the first cell calls `apply_default_style()` — retina
+fires only then and only under a real kernel; without it the gate tests the `{'png'}` construct==draw
+regime where an F7 freeze is invisible (F2). Tier A (value-level: scale survived, drawn==computed,
+slope==−α, no k≥171 overflow, F4 transpose, `draw_distribution` raises on log) + Tier B (extends B7 —
+in-view-tick dpi-ratio invariance). Both red cases fire. Validated locally; the in-container run is
+gated on the v0.11.1 image.
+
+> **Two diagnostic corrections recorded (code wins):** (1) `ax.get_ylim()[0] > 0` is a **tautology** on
+> a matplotlib log axis (a 0 floor is silently clamped to positive), so it is not a red-case-able
+> anti-clamp gate — the honest guard is `draw_distribution` raising on log. (2) Tier B's dpi-ratio uses
+> a **relative** tolerance (20%): small mathtext carries ~7% hinting noise where an F7 freeze is ~69%;
+> B7's absolute 0.5pt (tuned for a 100pt ellipse) false-positives on ~17pt tick labels.
+
+### Regression
+
+Deployed **L1–L7 byte-identical — 969/969 figures** (render_regression, `plot_style.__file__` asserted,
+unpinned; 1221 total = 969 deployed L1–L7 + 252 undeployed L8, verified across four independent renders).
+node-6 (opt-in, off), R1 (linear default), X1 (guard is a no-op for non-log), and X2 (no deployed
+undirected problem figure sets the keys) are all additive; only L8's poisson concept figure may shift sub-pixel
+from the log-space `poisson_pmf` re-derivation. `ENGINE_SYMBOLS` +10; drift guard green.
+
+---
+
 ## [0.11.0] — 2026-07-14 — probabilistic figures: distributions, sweeps, and a seeded ER sampler
 
 The engine has been **exact-rational-deterministic its whole life** — every figure a fixed

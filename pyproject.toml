@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cs470-engine"
-version = "0.11.0"
+version = "0.11.1"
 description = "CS 470 interactive worksheet engine"
 requires-python = ">=3.10"
 dependencies = [
@@ -24,3 +24,10 @@ dependencies = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["cs470_engine*"]
+
+# C3 Figure B's frozen E&K-copy in-degree count-table (Lesson 9). It ships in the
+# wheel/image so the figure reads committed data — no live sampler at render time
+# (L9 decision Q2). Byte-reproducible: regenerable from
+# random_graphs.ek_copy_indegree_counts(**C3_FROZEN_SAMPLE["params"]).
+[tool.setuptools.package-data]
+cs470_engine = ["data/*.json"]

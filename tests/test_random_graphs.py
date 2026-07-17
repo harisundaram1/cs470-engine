@@ -66,6 +66,45 @@ def test_poisson_pmf_normalizes_and_matches_known_values():
     # Blueprint T5: Poisson(2) at k=2 ~ 0.271, distinct from Binomial(10,.2)=0.302.
     assert abs(rg.poisson_pmf(2, 2.0) - 0.27067) < 1e-4
     assert rg.poisson_pmf(-1, 5.0) == 0.0
+    # lam == 0 is the point mass at 0 (log-space would hit log(0); the branch
+    # must return the exact answer, not raise).
+    assert rg.poisson_pmf(0, 0.0) == 1.0
+    assert rg.poisson_pmf(3, 0.0) == 0.0
+
+
+def test_poisson_pmf_log_space_fix_extends_range_without_moving_values():
+    """P1 (Lesson 9): the k>=171 OverflowError fix.
+
+    RED CASE — the OLD direct form (`exp(-lam) * lam**k / factorial(k)`) raises at
+    EXACTLY k=171 (`factorial(171)` > float max), which is why `poisson_series(3,
+    1000)` was undrawable. The log-space form must NOT raise there.
+    VALUE — and it must reproduce every correct pre-171 value to floating slop.
+    """
+    def direct(k, lam):                    # the pre-fix implementation, verbatim
+        return math.exp(-lam) * (lam ** k) / math.factorial(k)
+
+    # Red case: the old form genuinely raises at k=171; the new one returns.
+    raised = False
+    try:
+        direct(171, 3.0)
+    except OverflowError:
+        raised = True
+    assert raised, "the old direct form should raise at k=171 (guard the fix's premise)"
+    assert rg.poisson_pmf(171, 3.0) >= 0.0          # returns, does not raise
+    assert rg.poisson_pmf(200, 3.0) > 0.0           # spec's stated red case
+    assert rg.poisson_pmf(1000, 3.0) == 0.0         # underflows to 0, no raise
+    # F2 is now drawable: k_max = 1000 completes.
+    assert len(rg.poisson_series(3.0, 1000)) == 1001
+
+    # VALUE: the fix moves NO correct value. Match the direct form to < 2e-13
+    # relative on every representable k (0..170) across several lam.
+    worst = 0.0
+    for lam in (0.5, 3.0, 14.4, 50.0):
+        for k in range(0, 171):
+            a, b = direct(k, lam), rg.poisson_pmf(k, lam)
+            if a > 0:
+                worst = max(worst, abs(a - b) / a)
+    assert worst < 2e-13, f"poisson log-space fix moved a pre-171 value (rel {worst:.2e})"
 
 
 def test_degree_distribution_is_binomial_n_minus_1_with_mean_n_minus_1_p():
@@ -275,6 +314,131 @@ def test_dispatch_red_cases():
             assert False, f"spec did not raise: {spec}"
         except (ValueError, KeyError):
             pass
+
+
+# -----------------------------------------------------------------------------
+# Lesson 9 — C1 closed forms (power law + CCDF + exponent)
+# -----------------------------------------------------------------------------
+
+def _loglog_slope(pairs):
+    xs = [math.log10(k) for k, _ in pairs]
+    ys = [math.log10(v) for _, v in pairs]
+    n = len(xs)
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    return sxy / sxx
+
+
+def test_power_law_series_normalizes_and_reads_slope_minus_alpha():
+    for alpha in (2.1, 3.0):
+        s = rg.power_law_series(alpha, 1, 1000)
+        assert len(s) == 1000
+        assert abs(sum(p for _, p in s) - 1.0) < TOL           # a genuine pmf
+        # THE pedagogical invariant (F1): a log-log fit reads slope -alpha exactly.
+        assert abs(_loglog_slope(s) - (-alpha)) < 1e-9
+    # RED CASE: perturb one drawn ordinate off the law — the slope check moves.
+    s = rg.power_law_series(2.1, 1, 1000)
+    s_bad = [(s[0][0], s[0][1] * 2.0)] + s[1:]
+    assert abs(_loglog_slope(s_bad) - (-2.1)) > 1e-6
+    # k_min/k_max validation.
+    for bad in ((2.1, 0, 10), (2.1, 5, 4), (2.1, 1.5, 10)):
+        try:
+            rg.power_law_series(*bad); assert False
+        except (ValueError, TypeError):
+            pass
+
+
+def test_power_law_ccdf_reads_slope_minus_alpha_minus_1_and_transposes():
+    for alpha in (2.1, 3.0):
+        c = rg.power_law_ccdf(alpha, 1, 1000)
+        assert c[0] == (1, 1.0)                                 # F(k_min) = 1
+        assert abs(_loglog_slope(c) - (-(alpha - 1.0))) < 1e-9
+    # F4: Fig 18.4 IS Fig 18.3 transposed — the claim the figure makes, gated.
+    c = rg.power_law_ccdf(2.1, 1, 1000)
+    transpose = [(y, x) for x, y in c]
+    assert [x for x, _ in transpose] == [y for _, y in c]
+
+
+def test_exponent_from_p_and_the_p_half_collapse():
+    assert rg.exponent_from_p(0.5) == 3.0                       # truth for C3
+    assert abs(rg.exponent_from_p(1.0 / 11.0) - (1 + 1 / (10 / 11))) < TOL
+    # COLLAPSE TRAP (§4): 1+1/(1-p) and the p<->q swap 1+1/p BOTH = 3.0 at p=1/2.
+    assert rg.exponent_from_p(0.5) == 1 + 1 / 0.5
+    try:
+        rg.exponent_from_p(1.0); assert False                  # p<1 required
+    except ValueError:
+        pass
+
+
+# -----------------------------------------------------------------------------
+# Lesson 9 — C3: the biased alpha estimator, TWO mechanisms (do not conflate)
+# -----------------------------------------------------------------------------
+
+def test_c3_figure_A_MLE_bias_is_CURVATURE_present_at_infinite_data():
+    """Figure A (computation): from the EXACT E&K recurrence, no sampler.
+
+    MLE @ k_min=5 reads 2.57 (too shallow) vs truth 3.0; raising k_min -> 3.0.
+    This is a CURVATURE / body property: it appears with ZERO sampling noise and
+    is INVARIANT to the tail cap. Deterministic, so the value is asserted tightly
+    (unlike the frozen SAMPLE below, which is gated as a range).
+    """
+    exact = rg.ek_stationary_indegree(0.5, 200000)
+    assert abs(sum(f for _, f in exact) - 1.0) < 1e-9          # a pmf
+    assert abs(exact[0][1] - 1.0 / 1.5) < TOL                  # f0 = 1/(1+p)
+    mle5 = rg.alpha_mle(exact, 5)
+    mle50 = rg.alpha_mle(exact, 50)
+    assert abs(mle5 - 2.57) < 0.01, mle5                       # THE 2.57
+    assert 2.90 < mle50 < 3.01, mle50                          # raise k_min -> truth
+    assert mle50 > mle5                                        # tail beats body
+    # INVARIANT to tail cap == it is not a finite-data effect.
+    mle5_short = rg.alpha_mle(rg.ek_stationary_indegree(0.5, 1500), 5)
+    assert abs(mle5 - mle5_short) < 1e-3
+    # RED: at truth 3.0 the exponent line is exact — a perturbed p must move it.
+    assert rg.exponent_from_p(0.5) == 3.0
+
+
+def test_c3_figure_B_naiveLSQ_bias_is_FINITE_SAMPLE_and_reproducible():
+    """Figure B (critique, ws1 P9): from the FROZEN COMMITTED sample.
+
+    The naive log-log LSQ DIVERGES on the noisy tail (1.93 -> 0.88 as k_min 5->50)
+    — a FINITE-SAMPLE effect the exact form does NOT show. Gated as a RANGE, never
+    the literal digits (a pinned literal would be a tautology over the blob and
+    red on any re-freeze — spec §4.3 / diagnostic UNSURE #1).
+    """
+    counts = rg.frozen_c3_indegree_counts()
+    alpha_true = rg.exponent_from_p(0.5)                       # 3.0
+    naive5 = rg.alpha_naive_lsq(counts, 5)
+    naive50 = rg.alpha_naive_lsq(counts, 50)
+    # THE BIAS, as a range (spec's `alpha_naive < alpha_true - 0.5`):
+    assert naive5 < alpha_true - 0.5                           # biased low even @5
+    assert naive50 < naive5                                    # raising k_min DESTROYS the LSQ
+    assert naive50 < 1.5                                       # catastrophic divergence
+    # DISCRIMINATOR: only the SAMPLE diverges. The exact form's full-tail LSQ
+    # stays ~3.0 — so this bias is finite-sample, NOT curvature.
+    exact = rg.ek_stationary_indegree(0.5, 200000)
+    assert abs(rg.alpha_naive_lsq(exact, 50) - 3.0) < 0.05
+    # ...and the MLE@5 AGREES between sample and exact -> 2.57 is curvature, a
+    # DIFFERENT mechanism from this LSQ divergence (do not conflate them).
+    assert abs(rg.alpha_mle(counts, 5) - rg.alpha_mle(exact, 5)) < 0.05
+
+
+def test_c3_frozen_sample_is_byte_reproducible_local_and_container():
+    """The committed frozen table == a fresh regeneration from its pinned seed,
+    and its sha256 matches C3_FROZEN_SAMPLE — the same PCG64 discipline sample_gnp
+    uses, so local and in-container produce identical bytes."""
+    committed = rg.frozen_c3_indegree_counts()
+    regen = rg.ek_copy_indegree_counts(**rg.C3_FROZEN_SAMPLE["params"])
+    assert committed == regen
+    assert rg._c3_count_table_sha256(regen) == rg.C3_FROZEN_SAMPLE["sha256"]
+    # RED CASE: a different seed yields a different table (the seed is load-bearing).
+    other = rg.ek_copy_indegree_counts(**{**rg.C3_FROZEN_SAMPLE["params"], "seed": 8})
+    assert rg._c3_count_table_sha256(other) != rg.C3_FROZEN_SAMPLE["sha256"]
+    # Seed contract: non-int seed is rejected (no time/hash/PID seeding).
+    try:
+        rg.ek_copy_indegree_counts(100, 0.5, seed="x"); assert False
+    except ValueError:
+        pass
 
 
 def _run_all():

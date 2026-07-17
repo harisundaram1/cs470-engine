@@ -525,6 +525,69 @@ def _node_radius_data(ax, node_size):
         return 0.0
 
 
+def _node_radii_data_xy(ax, node_size):
+    """The marker radius in DATA units on EACH axis: ``(r_x_data, r_y_data)``.
+
+    A scatter marker is a circle in DISPLAY space, so under ``aspect='auto'`` its
+    data-unit half-width and half-height DIFFER — this is the node-6 anisotropy
+    (measured: r_x=0.100 but r_y=0.159 on the wide concept axes). ``_node_radius_data``
+    returns only the x radius; the per-axis pad below needs both. Falls back to
+    ``(0, 0)`` if the transform is not usable yet.
+    """
+    r_points = math.sqrt(max(node_size, 0.0) / math.pi)
+    r_px = r_points * ax.figure.dpi / 72.0
+    try:
+        ox, oy = ax.transData.transform((0, 0))
+        px1x, _ = ax.transData.transform((1, 0))
+        _, px1y = ax.transData.transform((0, 1))
+        px_per_x = abs(px1x - ox) or 1.0
+        px_per_y = abs(px1y - oy) or 1.0
+        return r_px / px_per_x, r_px / px_per_y
+    except Exception:
+        return 0.0, 0.0
+
+
+def frame_nodes_anisotropic(ax, pos, *, node_size=None, pad_frac=0.14):
+    """Pad ``ax`` limits per-axis so every node CIRCLE clears the frame — the
+    node-6 fix, keeping ``aspect='auto'`` (does NOT unify with ``frame_signed_axes``).
+
+    node-6 CAUSE (measured, F4(e) re-derived — NOT the docket's refuted "limits fit
+    to node CENTERS"): matplotlib's autoscale DOES pad the scatter datalim by the
+    marker size, but by the ISOTROPIC x-scale radius (0.100). Under ``aspect='auto'``
+    on a wide axes the marker's true data HALF-HEIGHT is larger (0.159), so the
+    top/bottom nodes are left ~6px of vertical clearance — a knife-edge that tips
+    into a clip under vertical compression or the container's retina/DejaVu metrics.
+
+    The fix pads each axis by that axis's OWN marker radius (``_node_radii_data_xy``)
+    plus a fractional margin of the node span, then UNIONS with the autoscaled
+    limits (only ever EXPANDS — a comfortably-framed figure that already contains
+    the padded box is untouched). Aspect stays ``auto``, so hand-placed layouts are
+    not un-stretched (unlike strategy A / ``frame_signed_axes``).
+
+    ⚠ This MOVES any figure whose nodes sit within the pad of the frame — which,
+    MEASURED, includes deployed L1 (``ties_triads`` nodes at ~1px) and L5 (~7px),
+    NOT only L8's node-6. It is therefore exposed as an OPT-IN parameter
+    (``draw_graph(..., frame_nodes=True)``), default off, so the deployed corpus
+    stays byte-identical and only figures that ask for it move. See ``draw_graph``.
+    """
+    if node_size is None:
+        node_size = GRAPH_STYLE["node_size"]
+    xs = [p[0] for p in pos.values()]
+    ys = [p[1] for p in pos.values()]
+    if not xs:
+        return
+    minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
+    span_x = max(maxx - minx, 1e-6)
+    span_y = max(maxy - miny, 1e-6)
+    r_x, r_y = _node_radii_data_xy(ax, node_size)
+    pad_x = r_x + pad_frac * span_x
+    pad_y = r_y + pad_frac * span_y
+    cur_x0, cur_x1 = ax.get_xlim()
+    cur_y0, cur_y1 = ax.get_ylim()
+    ax.set_xlim(min(cur_x0, minx - pad_x), max(cur_x1, maxx + pad_x))
+    ax.set_ylim(min(cur_y0, miny - pad_y), max(cur_y1, maxy + pad_y))
+
+
 def frame_signed_axes(ax, pos, *, node_size=None, rad=0.0, pad_frac=0.18,
                       extra_points=None):
     """Set deterministic limits + equal aspect for a signed-graph figure.
@@ -1518,6 +1581,7 @@ def draw_graph(
     node_groups=None,
     group_colors=None,
     group_legend=True,
+    frame_nodes=False,
 ):
     """Draw a networkx graph in the project's style.
 
@@ -1581,6 +1645,16 @@ def draw_graph(
         When True, each node in ``outside_options`` also gets a short dashed
         "pendant stub" half-edge dangling toward its outside-option label
         (cf. Figures 12.6/12.8/12.9). No effect unless ``outside_options`` is set.
+    frame_nodes : bool
+        When True, expand the axis limits (per-axis, keeping ``aspect='auto'``) so
+        every node circle clears the frame with a robust margin — the node-6 fix
+        (``frame_nodes_anisotropic``). Default **False**, which leaves matplotlib's
+        autoscale untouched so the figure is BYTE-IDENTICAL to the pre-0.11.1
+        renderer. It is opt-in rather than automatic because the pad MEASURABLY
+        moves deployed figures that sit near their frame (L1 ``ties_triads`` ~1px,
+        L5 ~7px — tighter than L8's node-6 at 6px), and the deployed corpus must
+        stay byte-identical (see the module note on ``frame_nodes_anisotropic``).
+        Lesson-8/9 graph figures set it; the deployed L1-L7 corpus does not.
 
     Returns
     -------
@@ -1737,6 +1811,12 @@ def draw_graph(
         below_caption=GRAPH_STYLE["outside_row_caption"],
         pendant_stub=pendant_stub,
     )
+
+    # node-6 fix (opt-in — default off is byte-identical). Pad AFTER all draws so
+    # the autoscaled limits are final; per-axis so the anisotropy is corrected
+    # without unifying aspect.
+    if frame_nodes:
+        frame_nodes_anisotropic(ax, pos, node_size=node_size)
 
     ax.set_axis_off()
     return pos
@@ -3041,7 +3121,7 @@ _XY_CURVE_COLORS = [COLORS["primary"], COLORS["accent"], COLORS["good"],
 
 def draw_distribution(ax, series, *, labels=None, x_label="value",
                       y_label="probability", title=None, note=None,
-                      x_ticks=True):
+                      x_ticks=True, xscale="linear", yscale="linear"):
     """Plot one or more discrete pmfs on shared axes (R1).
 
     ``series``: a list of series, each a list of integer-``x`` ``(x, prob)``
@@ -3056,10 +3136,29 @@ def draw_distribution(ax, series, *, labels=None, x_label="value",
     from the exact pmf (``random_graphs.binomial_pmf`` / ``poisson_pmf``); it
     plots them verbatim. ``labels`` (one per series) drives a legend.
 
+    ⚠ A LOG AXIS RAISES (X1, §3), it is NOT supported — deliberately, and this is
+    a fail-loud guard, not a fix. This renderer has THREE anchors at ``y=0`` that a
+    log axis silently mishandles: ``set_ylim(bottom=0)``, ``ax.bar``'s default
+    ``bottom=0``, and ``ax.vlines(xs, 0, ys)``. "Fixing" only the ylim floor
+    converts a silent clamp into a silent 73,000-px bar overhang (both F1). Nothing
+    in Lesson 9 needs a log pmf-bar chart — every log figure routes through
+    ``draw_xy_curve`` (which anchors nothing at 0). So a request for a log axis
+    here is a mistake, and the honest response is to RAISE and point at
+    ``draw_xy_curve``, not to degrade. (The dispatch also omits ``xscale``/
+    ``yscale`` from ``distribution``'s allowlist, so a YAML author is stopped one
+    layer earlier; this guard catches a direct caller.)
+
     Returns the ``(x, y)`` data actually plotted per series, so a value-level
     test can assert the drawn heights equal the computed pmf.
     """
     st = DISTRIBUTION_STYLE
+    if (xscale == "log" or yscale == "log"
+            or ax.get_xscale() == "log" or ax.get_yscale() == "log"):
+        raise ValueError(
+            "draw_distribution cannot draw a log axis: its bars and stems are "
+            "anchored at y=0 (three separate anchors), which a log scale silently "
+            "mishandles. Use draw_xy_curve(..., xscale/yscale='log') for a log "
+            "figure — it anchors nothing at 0.")
     apply_ax_style(ax)
     if series and isinstance(series[0], (int, float)):
         raise ValueError("draw_distribution: `series` must be a LIST OF series "
@@ -3101,10 +3200,47 @@ def draw_distribution(ax, series, *, labels=None, x_label="value",
     return drawn
 
 
+def _apply_curve_scales(ax, xscale, yscale):
+    """R1: validate + set x/y scales, and — for a log axis — the decade tick/grid
+    styling. Call IMMEDIATELY after ``apply_ax_style`` and BEFORE any plotting or
+    vline-label placement (§2.3 ORDERING CONSTRAINT).
+
+    ⚠ ORDERING is load-bearing, MEASURED: the vline label is placed at
+    ``ax.get_ylim()[1]`` — a LIVE read. Set the scale AFTER the data is plotted and
+    the label freezes at the LINEAR top (1.05) while the axis top becomes the log
+    top (2.065) — a 2x detachment (F7: never snapshot a number the framework hands
+    you live). Setting the scale FIRST makes the plot autoscale in log space, so
+    the later ``get_ylim()`` read returns the correct log top.
+
+    A ``'linear'`` scale is a NO-OP here (never calls ``set_?scale``), so the
+    linear default is byte-identical to the pre-R1 renderer — R1 is additive.
+    """
+    for name, val in (("xscale", xscale), ("yscale", yscale)):
+        if val not in ("linear", "log"):
+            raise ValueError(
+                f"draw_xy_curve: {name} must be 'linear' or 'log', got {val!r}. "
+                f"(An unknown scale must fail loudly, not degrade to linear.)")
+    if xscale == "log":
+        ax.set_xscale("log")
+    if yscale == "log":
+        ax.set_yscale("log")
+    if xscale == "log" or yscale == "log":
+        # Decade majors (LogLocator is the log default) + a light minor grid so
+        # a power-law line reads as straight across 3 decades. Added ONLY on a log
+        # axis, so a linear figure gets no grid and stays byte-identical. Tick
+        # labels render as mathtext `$10^{k}$`, which resolve through
+        # `mathtext.fontset='cm'` (bundled) => font-stable local and in-container.
+        ax.grid(True, which="major", linewidth=0.6, alpha=0.40,
+                color=COLORS["minor_tick"], zorder=0)
+        ax.grid(True, which="minor", linewidth=0.3, alpha=0.22,
+                color=COLORS["minor_tick"], zorder=0)
+
+
 def draw_xy_curve(ax, curves, *, x_label="x", y_label="y", title=None,
-                  note=None, vlines=None, y_lim=None):
+                  note=None, vlines=None, y_lim=None,
+                  xscale="linear", yscale="linear", slope_annotation=None):
     """Plot one or more ``(x, y)`` line series — a general metric-vs-parameter
-    sweep chart (R2).
+    sweep chart (R2), with optional log axes (R1).
 
     ``curves``: a list of series. Each is either a ``(xs, ys)`` pair or a dict
     ``{"x": [...], "y": [...], "label": str, "color": str, "linestyle": str,
@@ -3114,10 +3250,23 @@ def draw_xy_curve(ax, curves, *, x_label="x", y_label="y", title=None,
     they come from ``giant_component_fraction`` over a ``p``-range; this only
     draws.
 
+    ``xscale`` / ``yscale`` (R1): ``"linear"`` (default) or ``"log"``; anything
+    else RAISES (0.8.0 fail-loudly — an unknown scale must not degrade to linear).
+    The default is a no-op, so a linear ``xy_curve`` is byte-identical to the
+    pre-R1 renderer. This is the ONLY renderer that takes a log scale — bars/stems
+    (``draw_distribution``) are anchored at ``y=0`` and cannot be log'd (that
+    renderer RAISES on a log request; §3 / ``draw_distribution``).
+
+    ``slope_annotation`` (R1 / option ②): draw the true slope ON a log-log line —
+    see ``slope_annotation`` for the spec (a dict of its kwargs, e.g.
+    ``{"slope": -2.1, "x0": 3, "x1": 30}``). Requires log-log axes.
+
     Returns the ``(x, y)`` data plotted per curve for value-level testing.
     """
     st = DISTRIBUTION_STYLE
     apply_ax_style(ax)
+    # ORDERING CONSTRAINT (§2.3): scale FIRST — before plotting/vline labels.
+    _apply_curve_scales(ax, xscale, yscale)
     if curves and isinstance(curves[0], (int, float)):
         raise ValueError("draw_xy_curve: `curves` must be a LIST OF series, even "
                          "for one curve (each a (xs, ys) pair or a dict).")
@@ -3154,12 +3303,86 @@ def draw_xy_curve(ax, curves, *, x_label="x", y_label="y", title=None,
     ax.set_ylabel(y_label, fontsize=st["axis_fontsize"])
     if y_lim is not None:
         ax.set_ylim(*y_lim)
+    if slope_annotation is not None:
+        # Placed AFTER the curves + limits are final (and the scale is already log
+        # from _apply_curve_scales), so the triangle sits in the settled view.
+        _draw_slope_annotation_from_spec(ax, slope_annotation)
     if have_label:
         ax.legend(fontsize=st["legend_fontsize"], frameon=False)
     cap = note or title
     if cap:
         ax.set_title(cap, fontsize=st["annot_fontsize"], color=COLORS["text"])
     return drawn
+
+
+def _draw_slope_annotation_from_spec(ax, spec):
+    """Dispatch a ``slope_annotation`` figure/param dict to the primitive."""
+    kw = dict(spec)
+    slope = kw.pop("slope")
+    slope_annotation(ax, slope, **kw)
+
+
+def slope_annotation(ax, slope, *, x0, x1, y0=None, anchor_frac=0.62,
+                     label=None, color=None, triangle=True, label_legs=True):
+    """Draw a rise/run triangle whose hypotenuse has EXACT log-log slope ``slope``
+    (R1 / option ② — "show the slope, don't assert it"). Requires LOG-LOG axes.
+
+    The pedagogical invariant is that the drawn triangle shows the TRUE slope: the
+    three vertices are computed in LOG space and mapped back with ``10**``, so the
+    hypotenuse's measured log-log slope is ``slope`` to floating precision,
+    independent of the axes box (this is what the value test asserts). The right
+    angle sits at ``(x1, y0)``; the hypotenuse ``(x0, y0) -> (x1, y1)`` is parallel
+    to a line of that slope, with ``y1 = y0 * (x1 / x0) ** slope``.
+
+    ``x0`` < ``x1`` are the run endpoints in DATA units (both > 0). ``y0`` anchors
+    the top leg; if None it is placed at ``anchor_frac`` of the log y-view so the
+    triangle sits clear of a descending power-law line (the caller tunes ``y0``
+    for exact placement — placement is cosmetic, the slope is not). ``label``
+    defaults to ``slope = <slope>``.
+
+    Returns ``{"vertices": [(x0,y0),(x1,y0),(x1,y1)], "slope": slope}`` so a
+    value-level test can recover the drawn slope.
+    """
+    if ax.get_xscale() != "log" or ax.get_yscale() != "log":
+        raise ValueError(
+            "slope_annotation requires LOG-LOG axes (a slope triangle on a linear "
+            "or semi-log axis does not show a constant slope). Set xscale=yscale="
+            "'log' on draw_xy_curve first.")
+    if not (x0 > 0 and x1 > 0 and x1 > x0):
+        raise ValueError(f"slope_annotation: need 0 < x0 < x1, got x0={x0!r}, "
+                         f"x1={x1!r}.")
+    color = color or COLORS["text"]
+    if y0 is None:
+        lo, hi = ax.get_ylim()
+        if lo <= 0:
+            raise ValueError("slope_annotation: cannot auto-place y0 on a clamped "
+                             "log axis (ylim[0] <= 0). Pass y0 explicitly.")
+        # geometric interpolation in the log y-view
+        y0 = lo * (hi / lo) ** anchor_frac
+    # LOG-SPACE vertices: y1 exact so the hypotenuse slope IS `slope`.
+    y1 = y0 * (x1 / x0) ** slope
+    A, B, C = (x0, y0), (x1, y0), (x1, y1)
+
+    if triangle:
+        # run (top) + rise (right) legs, then the hypotenuse.
+        ax.plot([A[0], B[0]], [A[1], B[1]], color=color, linewidth=1.3, zorder=5)
+        ax.plot([B[0], C[0]], [B[1], C[1]], color=color, linewidth=1.3, zorder=5)
+        ax.plot([A[0], C[0]], [A[1], C[1]], color=color, linewidth=1.6,
+                linestyle=(0, (4, 2)), zorder=5)
+        if label_legs:
+            # rise leg labelled with the slope magnitude (the "-alpha" reading)
+            ax.annotate(f"{slope:g}", xy=(C[0], math.sqrt(B[1] * C[1])),
+                        xytext=(4, 0), textcoords="offset points",
+                        va="center", ha="left", color=color,
+                        fontsize=DISTRIBUTION_STYLE["annot_fontsize"])
+    lab = label if label is not None else f"slope = {slope:g}"
+    if lab:
+        # inline label near the hypotenuse midpoint (geometric mean == log midpoint)
+        ax.annotate(lab, xy=(math.sqrt(A[0] * C[0]), math.sqrt(A[1] * C[1])),
+                    xytext=(-2, -10), textcoords="offset points",
+                    va="top", ha="right", color=color,
+                    fontsize=DISTRIBUTION_STYLE["annot_fontsize"])
+    return {"vertices": [A, B, C], "slope": slope}
 
 
 # -----------------------------------------------------------------------------
