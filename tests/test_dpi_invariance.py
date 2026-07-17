@@ -143,12 +143,20 @@ def test_fringe_labels_enclosed_at_every_shipping_dpi():
 # -----------------------------------------------------------------------------
 def test_ratio_is_font_independent():
     ratios = {}
-    for family in (["DejaVu Sans"], ["Helvetica", "Arial", "DejaVu Sans"]):
-        matplotlib.rcParams["font.sans-serif"] = family
-        fig, ax = _schematic()
-        pairs = _fringe_pairs(ax, fig, 200.0)
-        ratios[family[0]] = max(tw / ew for _, tw, ew in pairs)
-        plt.close(fig)
+    # Restore the font family afterward: this test deliberately clobbers
+    # rcParams["font.sans-serif"], and leaking that state made the font-metric-
+    # sensitive sponsored-search declash test fail when it ran later in the suite
+    # (a test-isolation bug, not a logic one — both pass in isolation).
+    _saved_font = list(matplotlib.rcParams["font.sans-serif"])
+    try:
+        for family in (["DejaVu Sans"], ["Helvetica", "Arial", "DejaVu Sans"]):
+            matplotlib.rcParams["font.sans-serif"] = family
+            fig, ax = _schematic()
+            pairs = _fringe_pairs(ax, fig, 200.0)
+            ratios[family[0]] = max(tw / ew for _, tw, ew in pairs)
+            plt.close(fig)
+    finally:
+        matplotlib.rcParams["font.sans-serif"] = _saved_font
     lo, hi = min(ratios.values()), max(ratios.values())
     check(hi - lo < 0.05,
           f"the text/blob ratio depends on the resolved FONT ({ratios}) — a local pass "
