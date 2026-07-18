@@ -22,7 +22,13 @@ The engine pass that serves **both L8's deploy and L9's authoring**, cut as one 
 the chapter's visual signature — the **log-log power law** — plus the biased-estimator lesson and a
 gate that finally renders in the container. Built against the read-only diagnostic
 (`L9_ENGINE_PASS_2_DIAGNOSTIC.md`); where the spec and the code disagreed, the code won (three
-corrections recorded below). **Not tagged/imaged/deployed** — Hari verifies first.
+corrections recorded below).
+
+**DEPLOYED LIVE 2026-07-17.** Tagged `v0.11.1`, image `harisundaram/cs470-workspace:v0.11.1` pushed to Docker Hub and
+synced into PL, and **L8 (8.1 + 8.2) shipped on this release with Gate 5 PASSED** (figures render — including 8.2's
+−3.1px leaf; grading records scores; answer-keys 32/32; widgets work). The `frame_nodes` node-6 fix is confirmed clear
+end-to-end in the pinned + Reset PL workspace. Consumed by `pl-cs498hs` `28963c8`; L8 concept-cell opt-in in redesign
+`025db37`. L9 authoring (the other half this release serves) is not yet started.
 
 ### Added — `random_graphs.py` — the Lesson-9 heavy-tail layer (C1 + C3)
 
