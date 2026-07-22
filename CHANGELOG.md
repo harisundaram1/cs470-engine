@@ -16,6 +16,56 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [Unreleased] — edge-value labels (additive; **NOT tagged, NOT imaged**)
+
+⚠ **`main` is AHEAD of `v0.11.1` in the PACKAGE for the first time since the tag.** The previous
+state was *"`v0.11.1..HEAD` touches `CHANGELOG.md` only, package source identical"*; that is no
+longer true. `git diff v0.11.1..HEAD -- cs470_engine/` is **`+238/−0`**.
+**Nothing live changed** — the deployed image was built FROM the tag and the tag has not moved — but
+**Lesson 10 cannot deploy on `v0.11.1`**, because that image has no `draw_edge_value_labels` and
+every L10 figure carrying betweenness would RAISE on the unknown spec key. **A tag + image cut is a
+hard prerequisite of the L10 deploy.** Deliberately deferred: L10 is not deploying yet, and the cut
+should carry whatever else the authoring crunch adds rather than being spent on one layer.
+
+### Added — `draw_graph(..., edge_values=...)` and `draw_edge_value_labels`
+
+Betweenness and per-root flow are properties **of an edge**, and every existing annotation layer
+writes at a NODE or at a curved arc's apex — a Girvan–Newman figure had nowhere to put its numbers.
+
+- **UNDIRECTED-ONLY, and a directed spec naming it RAISES** from the key check — same precedent and
+  reason as `frame_nodes`. `draw_directed_graph` has no such layer and its arcs curve for reciprocal
+  pairs, so a straight-chord midpoint would miss the drawn line. **Capability absent LOUDLY.**
+- **Allowlisted *and* returned** from `_resolve_graph_annotations`. An allowlist entry alone is half
+  a change — that gap is how `node_size`/`show_labels` evaporated on this branch before `v0.11.1`.
+- **Three geometry decisions, each measured, none inherited:**
+  - the perpendicular is taken in **DISPLAY** space, not data space. The nearest precedent (9.2's
+    `render_copying_step`) takes the *data*-space perpendicular — correct there **only** because
+    `draw_directed_graph` forces aspect 1.0. `draw_graph` leaves `aspect='auto'`.
+  - the offset is in **POINTS** via `offset points`, so matplotlib applies the live dpi and nothing
+    freezes `dpi/72` (F7). Asserted at **ratio 2.0000** across dpi 100 → 200.
+  - the label is **rotated onto the shaft**, so the gap is its clearance at every point of the text
+    and is **independent of glyph width** — which is what carries it across Helvetica → DejaVu.
+- **The side is measured, not chosen:** both candidate anchors scored in points against every node
+  circle and foreign edge; ties break to `+y`, so the figure never depends on dict order.
+
+### Verified
+
+- **BYTE-IDENTICAL on the deployed corpus: 1340 render-ids across all 19 deployed worksheets, zero
+  diff.** Baseline rendered against a **pristine `git worktree` at `a725151`**, `__editable__`
+  finder stripped from `sys.meta_path`, old checkout at `sys.path[0]`, **`plot_style.__file__`
+  asserted on both sides**, and the pristine copy asserted to **lack** `draw_edge_value_labels`.
+  `PYTHONHASHSEED=random`. Package diff `+238/−0` — no existing line changed.
+- **Red-case test in the same commit**: `tests/test_edge_values.py`, 13 assertions, all pass —
+  including a red case proving the *data*-space recipe would **not** have produced the same offset
+  (cos 0.468), so the display-space claim is measured rather than assumed.
+- Full suite green: 9 test files unchanged and passing beside the new one.
+
+⚠ **NEVER RENDERED IN THE CONTAINER.** Both regime axes are addressed by *construction* (points
+offset; rotation making the gap width-independent) and the dpi axis is asserted locally — but
+construction is not evidence. Render it in the built image before the layer's first deploy.
+
+---
+
 ## [0.11.1] — 2026-07-17 — Lesson 9 power laws: log axes, the heavy-tail compute layer, and a semantic container gate
 
 The engine pass that serves **both L8's deploy and L9's authoring**, cut as one release. L9 needs
