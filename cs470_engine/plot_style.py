@@ -147,6 +147,15 @@ GRAPH_STYLE = {
     # circle regardless of node_size.
     "value_annotation_size":   12,
     "value_annotation_gap":    6,     # points of clearance beyond the node radius
+
+    # Edge-value labels (Lesson 10): a number written ALONGSIDE an edge — the
+    # betweenness of that edge, or the per-root flow it is summed from. Drawn by
+    # `draw_edge_value_labels`, which is opt-in and never called unless a caller
+    # passes `edge_values`, so the deployed corpus is byte-identical. The gap is
+    # in POINTS (ink, not data — F7) and is measured PERPENDICULAR to the edge in
+    # DISPLAY space, so it survives `aspect='auto'` and every dpi regime.
+    "edge_value_gap":          4.5,   # points from the shaft to the text baseline
+    "edge_value_color":        COLORS["text"],
     # Free-direction placement. A label is offset straight up (value) or straight
     # down (outside option) UNLESS that direction runs too close to one of the
     # node's own incident edges — on a diagonal layout an edge can leave a node at
@@ -1505,6 +1514,183 @@ def _draw_node_annotations(G, pos, ax, *, node_size, above=None, below=None,
         cap.set_gid("cs470:rowcap")
 
 
+# -----------------------------------------------------------------------------
+# Edge-value labels (Lesson 10) — a number written ALONGSIDE an edge
+# -----------------------------------------------------------------------------
+#
+# Betweenness, and the per-root flow it is summed from, are properties OF AN
+# EDGE. Every other annotation layer in this module writes at a NODE
+# (`_draw_node_annotations`) or at a curved arc's apex (signed `+`/`-`), so a
+# Girvan-Newman figure had nowhere to put its numbers. This is that layer.
+#
+# 🧨 THREE THINGS ARE LOAD-BEARING, AND ONLY ONE OF THEM IS OBVIOUS.
+#
+#  1. THE PERPENDICULAR IS COMPUTED IN DISPLAY SPACE, NOT DATA SPACE. The
+#     nearest precedent — 9.2's `render_copying_step` — takes the perpendicular
+#     of the DATA-space chord, and says so out loud: it is correct there ONLY
+#     because `draw_directed_graph` frames its axes at aspect 1.0, so a data
+#     perpendicular is a page perpendicular. `draw_graph` leaves `aspect='auto'`.
+#     Copying that recipe verbatim onto an undirected figure would tilt every
+#     offset by the axes' own anisotropy — largest on exactly the wide, short
+#     concept canvas (6 x 3.8) these figures ship on. So: transform to display,
+#     take the perpendicular THERE, and hand matplotlib a points offset.
+#
+#  2. THE OFFSET IS IN POINTS AND THE LABEL IS ROTATED ONTO THE SHAFT. Points,
+#     because the gap must look the same at any figure size and any dpi — it is
+#     INK, not data (F7); `textcoords="offset points"` lets matplotlib apply the
+#     live dpi instead of us freezing `dpi/72` into a transform. Rotated,
+#     because then the gap is the label's clearance at EVERY point of the text
+#     and is therefore independent of how WIDE the text is. That is what makes
+#     this safe across the font regimes: the container renders DejaVu, whose
+#     glyphs are wider than the laptop's Helvetica, and an UNROTATED
+#     perpendicular offset would have to grow with the text width by
+#     (w/2)*tan(theta) — a correction measured in one font and wrong in the other
+#     (invariant 10, and the 0.10.1 overflow's exact shape).
+#
+#  3. THE SIDE IS MEASURED, NOT CHOSEN BY HAND. 9.2 could hard-code "+y side"
+#     because one author knew one layout. A helper used across a whole lesson
+#     cannot. Both candidate anchors are scored by their true clearance — in
+#     POINTS, so the score is dpi-invariant — against every node circle and
+#     every other edge segment, and the roomier side wins. Ties break to the +y
+#     side, deterministically, so the figure does not depend on dict order
+#     (invariant 8).
+#
+# It returns its own measurements so a check script can ASSERT the clearance
+# rather than trusting it: an author who places two nodes too close gets a
+# number, not a surprise.
+
+
+def draw_edge_value_labels(G, pos, ax, edge_values, *, node_size=None,
+                           font_size=None, gap=None):
+    """Write a value alongside each edge, rotated onto the edge and offset clear of it.
+
+    Parameters
+    ----------
+    G, pos, ax
+        As passed to :func:`draw_graph`. **Call this AFTER every draw and after
+        any framing pass** — the display transform must be final, or the
+        perpendicular is taken against limits that then move.
+    edge_values : dict or iterable
+        ``{(u, v): value}``, or an iterable of ``(u, v, value)`` triples. Edge
+        orientation is irrelevant. Values are formatted by
+        :func:`_exchange_value_label`, so ``Fraction(3, 2)`` prints ``3/2`` as
+        PLAIN text — never mathtext, matching the node-value rows.
+    node_size : int, optional
+        The node marker area actually drawn, used to turn node CENTRES into node
+        CIRCLES when measuring clearance. Defaults to ``GRAPH_STYLE["node_size"]``.
+    font_size, gap : optional
+        Label size and the perpendicular offset, both in points. Default to
+        ``GRAPH_STYLE["annotation_font_size"]`` and
+        ``GRAPH_STYLE["edge_value_gap"]``.
+
+    Returns
+    -------
+    dict
+        ``{(u, v): {"side": +1|-1, "clearance_points": float, "angle_deg": float}}``
+        — the MEASURED clearance of the chosen anchor from the nearest node
+        circle or foreign edge. Negative means the label's anchor sits inside
+        something; a check script should red on it.
+    """
+    if not edge_values:
+        return {}
+    if node_size is None:
+        node_size = GRAPH_STYLE["node_size"]
+    if font_size is None:
+        font_size = GRAPH_STYLE["annotation_font_size"]
+    if gap is None:
+        gap = GRAPH_STYLE["edge_value_gap"]
+
+    if isinstance(edge_values, dict):
+        items = [(u, v, val) for (u, v), val in edge_values.items()]
+    else:
+        items = [tuple(item) for item in edge_values]
+
+    # Everything below is in POINTS on the page: display pixels divided by the
+    # live dpi scale. Working in points (not px) is what makes the side choice
+    # dpi-invariant instead of merely dpi-consistent.
+    scale = ax.figure.dpi / 72.0
+    try:
+        disp = {n: tuple(c / scale for c in ax.transData.transform(p))
+                for n, p in pos.items()}
+    except Exception:                      # transform not usable yet
+        return {}
+
+    node_r = math.sqrt(max(node_size, 0.0) / math.pi)
+    segments = [(disp[u], disp[v]) for u, v in G.edges()
+                if u in disp and v in disp]
+
+    def _clearance(point, skip):
+        """Distance in points from ``point`` to the nearest node circle or edge."""
+        best = float("inf")
+        for n, q in disp.items():
+            best = min(best, math.hypot(point[0] - q[0], point[1] - q[1]) - node_r)
+        for a, b in segments:
+            if (a, b) == skip or (b, a) == skip:
+                continue
+            best = min(best, _point_segment_distance(point, a, b))
+        return best
+
+    report = {}
+    for u, v, value in items:
+        if u not in disp or v not in disp:
+            raise ValueError(
+                f"draw_edge_value_labels: edge ({u!r}, {v!r}) names a node that is "
+                f"not in the layout. Known: {sorted(disp)}")
+        (x0, y0), (x1, y1) = disp[u], disp[v]
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            continue
+        ux, uy = dx / length, dy / length
+        px, py = -uy, ux                    # display-space perpendicular
+        mid = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+        skip = (disp[u], disp[v])
+
+        cand = []
+        for sign in (+1, -1):
+            anchor = (mid[0] + sign * gap * px, mid[1] + sign * gap * py)
+            cand.append((_clearance(anchor, skip), sign))
+        # Roomier side wins; an exact tie takes the +y side so the choice never
+        # depends on iteration order.
+        best_clear, side = max(
+            cand, key=lambda c: (round(c[0], 6), c[1] * (1 if py >= 0 else -1)))
+
+        nx_, ny_ = side * px, side * py
+        angle = math.degrees(math.atan2(dy, dx))
+        if ny_ < 0:                         # keep the label above its own edge and
+            nx_, ny_ = -nx_, -ny_           # the text right-way-up — one flip, so
+            angle += 180                    # va="bottom" stays the offset side
+        if angle > 90:
+            angle -= 180
+        elif angle < -90:
+            angle += 180
+
+        txt = ax.annotate(
+            _exchange_value_label(value),
+            xy=(pos[u][0] / 2 + pos[v][0] / 2, pos[u][1] / 2 + pos[v][1] / 2),
+            xytext=(nx_ * gap, ny_ * gap), textcoords="offset points",
+            ha="center", va="bottom", rotation=angle, rotation_mode="anchor",
+            fontsize=font_size, color=GRAPH_STYLE["edge_value_color"],
+            annotation_clip=False,
+        )
+        txt.set_gid("cs470:edgeval")
+        report[(u, v)] = {"side": side, "clearance_points": round(best_clear, 4),
+                          "angle_deg": round(angle, 2)}
+    return report
+
+
+def _point_segment_distance(p, a, b):
+    """Shortest distance from point ``p`` to segment ``a``-``b`` (same units in, out)."""
+    ax_, ay = a
+    bx, by = b
+    dx, dy = bx - ax_, by - ay
+    denom = dx * dx + dy * dy
+    if denom < 1e-12:
+        return math.hypot(p[0] - ax_, p[1] - ay)
+    t = max(0.0, min(1.0, ((p[0] - ax_) * dx + (p[1] - ay) * dy) / denom))
+    return math.hypot(p[0] - (ax_ + t * dx), p[1] - (ay + t * dy))
+
+
 def _resolve_group_colors(groups, group_colors=None):
     """Map each group name to a palette color, in first-appearance order.
 
@@ -1582,6 +1768,7 @@ def draw_graph(
     group_colors=None,
     group_legend=True,
     frame_nodes=False,
+    edge_values=None,
 ):
     """Draw a networkx graph in the project's style.
 
@@ -1655,6 +1842,13 @@ def draw_graph(
         L5 ~7px — tighter than L8's node-6 at 6px), and the deployed corpus must
         stay byte-identical (see the module note on ``frame_nodes_anisotropic``).
         Lesson-8/9 graph figures set it; the deployed L1-L7 corpus does not.
+    edge_values : dict or iterable, optional
+        ``{(u, v): value}`` (or ``(u, v, value)`` triples) written ALONGSIDE each
+        edge — the Lesson-10 betweenness / flow layer, drawn by
+        :func:`draw_edge_value_labels`. Default **None**, and the helper is not
+        called at all when it is None, so the deployed corpus is BYTE-IDENTICAL.
+        Applied last, after ``frame_nodes``, because the perpendicular is taken
+        against the display transform and the limits must already be final.
 
     Returns
     -------
@@ -1817,6 +2011,13 @@ def draw_graph(
     # without unifying aspect.
     if frame_nodes:
         frame_nodes_anisotropic(ax, pos, node_size=node_size)
+
+    # Edge-value labels (Lesson 10). LAST, and after `frame_nodes` on purpose:
+    # the perpendicular offset is taken against the DISPLAY transform, so the
+    # axis limits have to be final or every label is tilted against limits that
+    # then moved. `None` skips the call entirely => byte-identical by default.
+    if edge_values:
+        draw_edge_value_labels(G, pos, ax, edge_values, node_size=node_size)
 
     ax.set_axis_off()
     return pos

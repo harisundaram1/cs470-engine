@@ -747,7 +747,36 @@ def _resolve_graph_annotations(figure_spec: dict, G) -> dict:
         "node_values": node_values,
         "outside_options": outside_options,
         "pendant_stub": pendant_stub,
+        # Lesson-10 edge-value layer. YAML shape is a list of [u, v, value]
+        # triples, matching `edges:`; `None` when absent, and `draw_graph` skips
+        # the helper entirely on None, so every pre-Lesson-10 figure is
+        # byte-identical. ⚠ ALLOWLISTED **AND** RETURNED HERE — an allowlist
+        # entry alone is half a change, which is exactly how `node_size` and
+        # `show_labels` evaporated on this branch before v0.11.1 (see the note
+        # above them).
+        "edge_values": _edge_values_from_spec(figure_spec),
     }
+
+
+def _edge_values_from_spec(figure_spec: dict):
+    """Parse ``edge_values: [[u, v, value], ...]`` into the draw kwarg.
+
+    Returns ``None`` when the key is absent — the byte-identity guarantee rests
+    on this being ``None`` and not an empty dict, because ``draw_graph`` tests
+    truthiness and an empty dict would still be falsy but a future refactor
+    should not have to know that.
+    """
+    raw = figure_spec.get("edge_values")
+    if not raw:
+        return None
+    out = []
+    for item in raw:
+        if not (isinstance(item, (list, tuple)) and len(item) == 3):
+            raise ValueError(
+                "figure kind 'graph': every 'edge_values' entry must be a "
+                f"[u, v, value] triple; got {item!r}.")
+        out.append((item[0], item[1], item[2]))
+    return out
 
 
 # -----------------------------------------------------------------------------
@@ -783,6 +812,14 @@ _GRAPH_KEYS_UNDIRECTED = frozenset({
     # node-6 fix (v0.11.1): the per-axis node-framing pad, opt-in. Undirected-only
     # — the directed path already frames via `frame_signed_axes` and never clips.
     "frame_nodes",
+    # Lesson-10 edge-value labels (betweenness / per-root flow). UNDIRECTED-ONLY
+    # and deliberately so: `draw_directed_graph` has no such layer, and its arcs
+    # curve for reciprocal pairs, so a straight-chord midpoint would be off the
+    # drawn line. Listing it here rather than in COMMON means a DIRECTED spec
+    # that names it RAISES from the key check with the known set — the capability
+    # is absent LOUDLY, which is the one thing the 0.8.0/v0.11.1 evaporation bugs
+    # were not. Same precedent, same reason, as `frame_nodes` above.
+    "edge_values",
 })
 _GRAPH_KEYS_DIRECTED = frozenset({
     "highlight_color", "node_values_below", "value_caption", "below_caption",
