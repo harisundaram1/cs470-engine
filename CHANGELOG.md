@@ -16,16 +16,42 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
-## [Unreleased] — edge-value labels (additive; **NOT tagged, NOT imaged**)
+## [0.12.0] — 2026-08-10 — the edge-value label layer, tagged and imaged for the Lesson 10 deploy
 
-⚠ **`main` is AHEAD of `v0.11.1` in the PACKAGE for the first time since the tag.** The previous
-state was *"`v0.11.1..HEAD` touches `CHANGELOG.md` only, package source identical"*; that is no
-longer true. `git diff v0.11.1..HEAD -- cs470_engine/` is **`+238/−0`**.
-**Nothing live changed** — the deployed image was built FROM the tag and the tag has not moved — but
-**Lesson 10 cannot deploy on `v0.11.1`**, because that image has no `draw_edge_value_labels` and
-every L10 figure carrying betweenness would RAISE on the unknown spec key. **A tag + image cut is a
-hard prerequisite of the L10 deploy.** Deliberately deferred: L10 is not deploying yet, and the cut
-should carry whatever else the authoring crunch adds rather than being spent on one layer.
+Cut to serve the **L10 (10.1 + 10.2) deploy**, which cannot run on `v0.11.1`: that image has no
+`draw_edge_value_labels`, so every L10 figure carrying betweenness would RAISE on the unknown spec
+key. Image `harisundaram/cs470-workspace:v0.12.0`.
+
+**⚠ MEASURE THE DELTA AGAINST THE TAG, NOT AGAINST THE PARENT COMMIT — the two disagree and only
+one of them describes the live corpus.** Read commit-to-commit, the fix pass below is `+184/−33`
+and the section header for it says the structural *"no existing line changed"* argument is
+unavailable. **That is true of the COMMIT and false of the RELEASE.** MEASURED at this cut:
+
+```
+git diff --numstat v0.11.1..HEAD -- cs470_engine/
+340   0   cs470_engine/plot_style.py
+ 49   0   cs470_engine/problems.py
+```
+
+**`+389/−0` — zero deletions.** The 33 re-indented lines were themselves introduced by `5ac44e1`,
+which was **never tagged and never imaged**, so relative to the engine that is actually deployed
+they are not *existing* lines at all — they are new lines edited before their first release. A
+zero-deletion tree diff is the strong form: **no line present in `v0.11.1` was removed or
+modified**, in order, in either file.
+
+**⚠ AND THIS CHANGES NOTHING ABOUT WHAT COUNTS AS EVIDENCE.** The structural argument is an
+argument; the byte-identity run is the evidence, and §2.10's rule stands on its own — *a
+byte-identity gate cannot see a render bug in a figure the corpus does not yet contain*, and every
+L10 edge-labeled figure is exactly such a figure. Re-proven at this cut against the **tagged**
+engine: **1340 render-ids across all 19 deployed worksheets, zero diff**, baseline rendered from a
+pristine `git worktree` at `v0.11.1` with `cs470_engine.plot_style.__file__` asserted on both sides
+and the pristine copy asserted to **lack** `draw_edge_value_labels`. **The cross-check that the
+`__file__` assertion is silent on** (§2.9(b), the concurrency race) is closed here by construction:
+the baseline worktree is a detached checkout of the tag, captured after the source stopped moving.
+
+**⇒ The release is additive on the corpus we HAVE.** Repointing a live question to `v0.12.0` needs
+no figure re-verification on that evidence. It says nothing about L10's own new figures, which is
+what the container gate is for.
 
 ### Added — `upright` / `stacked_fractions` on the edge-value layer (2026-08-10)
 
