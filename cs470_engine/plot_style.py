@@ -1560,9 +1560,76 @@ def _draw_node_annotations(G, pos, ax, *, node_size, above=None, below=None,
 # number, not a surprise.
 
 
+def _stacked_value_label(v):
+    """Mathtext label for an edge value — a stacked ``\\frac`` for a true fraction.
+
+    ⚠ This is DELIBERATELY NOT ``_exchange_value_label``, and the two must not be
+    merged. That formatter is shared with the Lesson-4/5/6 network-exchange rows
+    and its contract is *never mathtext* (the Lesson-4 double-wrap crash class);
+    widening it would move deployed figures and re-land that class. This one is
+    reachable only from ``draw_edge_value_labels(..., stacked_fractions=True)``,
+    whose sole consumer is Lesson 10.
+
+    Integers stay PLAIN (``4``), exactly as before — only a denominator other
+    than 1 is worth the vertical space, and only fractions are hard to read
+    inline. A string passes through verbatim, so an author who has already
+    written mathtext is not double-wrapped.
+    """
+    if isinstance(v, str):
+        return v
+    frac = Fraction(v).limit_denominator(1000)
+    if frac.denominator == 1:
+        return str(frac.numerator)
+    sign = "-" if frac.numerator < 0 else ""
+    return rf"${sign}\frac{{{abs(frac.numerator)}}}{{{frac.denominator}}}$"
+
+
+def _text_size_points(txt, ax):
+    """A drawn text's (width, height) in POINTS, measured in the live font.
+
+    Points, not pixels, and MEASURED rather than estimated — the two reasons are
+    the same two axes that have bitten this project (F7, invariant 10). Dividing
+    the pixel extent by the live ``dpi/72`` is dpi-invariant because a font size
+    is itself in points, so the number this returns is the same at construct dpi
+    100 and 200; and measuring rather than estimating from character counts is
+    what makes it correct in DejaVu as well as Helvetica.
+    """
+    fig = ax.figure
+    try:
+        renderer = fig.canvas.get_renderer()
+    except AttributeError:                 # backend with no cached renderer
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    bb = txt.get_window_extent(renderer)
+    scale = fig.dpi / 72.0
+    return bb.width / scale, bb.height / scale
+
+
+def _box_point_distance(box, p):
+    """Distance from an axis-aligned box ``(cx, cy, w, h)`` to point ``p``. Exact."""
+    cx, cy, w, h = box
+    return math.hypot(max(abs(p[0] - cx) - w / 2.0, 0.0),
+                      max(abs(p[1] - cy) - h / 2.0, 0.0))
+
+
+def _box_segment_distance(box, a, b):
+    """Distance from an axis-aligned box to segment ``a``-``b``. Exact when disjoint.
+
+    For two disjoint convex sets the minimum distance is attained at a vertex of
+    one and some point of the other, so taking the min over {box corners -> the
+    segment} and {segment endpoints -> the box} is exact, not a sample.
+    """
+    cx, cy, w, h = box
+    corners = [(cx - w / 2.0, cy - h / 2.0), (cx + w / 2.0, cy - h / 2.0),
+               (cx - w / 2.0, cy + h / 2.0), (cx + w / 2.0, cy + h / 2.0)]
+    return min([_point_segment_distance(c, a, b) for c in corners]
+               + [_box_point_distance(box, a), _box_point_distance(box, b)])
+
+
 def draw_edge_value_labels(G, pos, ax, edge_values, *, node_size=None,
-                           font_size=None, gap=None):
-    """Write a value alongside each edge, rotated onto the edge and offset clear of it.
+                           font_size=None, gap=None, upright=False,
+                           stacked_fractions=False):
+    """Write a value alongside each edge, offset clear of it.
 
     Parameters
     ----------
@@ -1582,14 +1649,38 @@ def draw_edge_value_labels(G, pos, ax, edge_values, *, node_size=None,
         Label size and the perpendicular offset, both in points. Default to
         ``GRAPH_STYLE["annotation_font_size"]`` and
         ``GRAPH_STYLE["edge_value_gap"]``.
+    upright : bool, optional
+        **Default False — the rotated behaviour is unchanged, byte for byte.**
+        When True the label is drawn HORIZONTALLY (``rotation=0``) and pushed out
+        along the display-space perpendicular far enough that its *measured
+        bounding box* clears the shaft by ``gap`` points.
+
+        ⚠ The extra push is not decoration, it is the whole correctness argument.
+        A rotated label lies along the shaft, so ``gap`` is its clearance at every
+        point of the text and the number is independent of how wide the text is —
+        which is what makes the rotated path safe across the Helvetica -> DejaVu
+        regime change (invariant 10). An upright label gives that up: an
+        axis-aligned box offset perpendicular to a slanted edge loses
+        ``(w/2)|n_x| + (h/2)|n_y|`` of clearance to its own corners, and ``w``
+        moves with the font. So the offset here is DERIVED FROM THE LABEL'S OWN
+        MEASURED EXTENT at render time, in whatever font is resolved, rather than
+        from a constant measured on one machine — the same reasoning that keeps
+        ``check_10_figures.py``'s clearance floor off a hard-coded number.
+    stacked_fractions : bool, optional
+        Default False. When True, a value with a denominator other than 1 renders
+        as stacked mathtext (``$\\frac{3}{2}$``) instead of ``3/2``. Integers are
+        unaffected. Only meaningful with ``upright=True`` — a stacked fraction
+        rotated onto a shaft is worse than the inline form, not better.
 
     Returns
     -------
     dict
         ``{(u, v): {"side": +1|-1, "clearance_points": float, "angle_deg": float}}``
-        — the MEASURED clearance of the chosen anchor from the nearest node
-        circle or foreign edge. Negative means the label's anchor sits inside
-        something; a check script should red on it.
+        — the MEASURED clearance from the nearest node circle or foreign edge.
+        Negative means the label sits inside something; a check script should red
+        on it. ⚠ The clearance is measured against the label's **anchor point** on
+        the rotated path and against its **whole bounding box** on the upright
+        path, because those are the respective shapes the ink actually occupies.
     """
     if not edge_values:
         return {}
@@ -1630,6 +1721,17 @@ def draw_edge_value_labels(G, pos, ax, edge_values, *, node_size=None,
             best = min(best, _point_segment_distance(point, a, b))
         return best
 
+    def _box_clearance(box, skip):
+        """Same measurement for a whole axis-aligned label box, in points."""
+        best = float("inf")
+        for n, q in disp.items():
+            best = min(best, _box_point_distance(box, q) - node_r)
+        for a, b in segments:
+            if (a, b) == skip or (b, a) == skip:
+                continue
+            best = min(best, _box_segment_distance(box, a, b))
+        return best
+
     report = {}
     for u, v, value in items:
         if u not in disp or v not in disp:
@@ -1646,33 +1748,61 @@ def draw_edge_value_labels(G, pos, ax, edge_values, *, node_size=None,
         mid = ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
         skip = (disp[u], disp[v])
 
-        cand = []
-        for sign in (+1, -1):
-            anchor = (mid[0] + sign * gap * px, mid[1] + sign * gap * py)
-            cand.append((_clearance(anchor, skip), sign))
-        # Roomier side wins; an exact tie takes the +y side so the choice never
-        # depends on iteration order.
-        best_clear, side = max(
-            cand, key=lambda c: (round(c[0], 6), c[1] * (1 if py >= 0 else -1)))
+        data_mid = (pos[u][0] / 2 + pos[v][0] / 2, pos[u][1] / 2 + pos[v][1] / 2)
 
-        nx_, ny_ = side * px, side * py
-        angle = math.degrees(math.atan2(dy, dx))
-        if ny_ < 0:                         # keep the label above its own edge and
-            nx_, ny_ = -nx_, -ny_           # the text right-way-up — one flip, so
-            angle += 180                    # va="bottom" stays the offset side
-        if angle > 90:
-            angle -= 180
-        elif angle < -90:
-            angle += 180
+        if upright:
+            # Draw first, measure, then place: the push-out distance depends on
+            # the label's own rendered size, which no formula knows in advance.
+            txt = ax.annotate(
+                _stacked_value_label(value) if stacked_fractions
+                else _exchange_value_label(value),
+                xy=data_mid, xytext=(0.0, 0.0), textcoords="offset points",
+                ha="center", va="center", rotation=0,
+                fontsize=font_size, color=GRAPH_STYLE["edge_value_color"],
+                annotation_clip=False,
+            )
+            w, h = _text_size_points(txt, ax)
+            # Distance from the shaft to the BOX CENTRE that leaves the nearest
+            # corner exactly `gap` clear. Derived, not tuned: the support of an
+            # axis-aligned box along the unit normal is (w/2)|n_x| + (h/2)|n_y|.
+            push = gap + (w / 2.0) * abs(px) + (h / 2.0) * abs(py)
+            cand = []
+            for sign in (+1, -1):
+                centre = (mid[0] + sign * push * px, mid[1] + sign * push * py)
+                cand.append((_box_clearance((*centre, w, h), skip), sign))
+            best_clear, side = max(
+                cand, key=lambda c: (round(c[0], 6), c[1] * (1 if py >= 0 else -1)))
+            nx_, ny_ = side * px, side * py
+            txt.set_position((nx_ * push, ny_ * push))
+            angle = 0.0
+        else:
+            cand = []
+            for sign in (+1, -1):
+                anchor = (mid[0] + sign * gap * px, mid[1] + sign * gap * py)
+                cand.append((_clearance(anchor, skip), sign))
+            # Roomier side wins; an exact tie takes the +y side so the choice never
+            # depends on iteration order.
+            best_clear, side = max(
+                cand, key=lambda c: (round(c[0], 6), c[1] * (1 if py >= 0 else -1)))
 
-        txt = ax.annotate(
-            _exchange_value_label(value),
-            xy=(pos[u][0] / 2 + pos[v][0] / 2, pos[u][1] / 2 + pos[v][1] / 2),
-            xytext=(nx_ * gap, ny_ * gap), textcoords="offset points",
-            ha="center", va="bottom", rotation=angle, rotation_mode="anchor",
-            fontsize=font_size, color=GRAPH_STYLE["edge_value_color"],
-            annotation_clip=False,
-        )
+            nx_, ny_ = side * px, side * py
+            angle = math.degrees(math.atan2(dy, dx))
+            if ny_ < 0:                     # keep the label above its own edge and
+                nx_, ny_ = -nx_, -ny_       # the text right-way-up — one flip, so
+                angle += 180                # va="bottom" stays the offset side
+            if angle > 90:
+                angle -= 180
+            elif angle < -90:
+                angle += 180
+
+            txt = ax.annotate(
+                _exchange_value_label(value),
+                xy=data_mid,
+                xytext=(nx_ * gap, ny_ * gap), textcoords="offset points",
+                ha="center", va="bottom", rotation=angle, rotation_mode="anchor",
+                fontsize=font_size, color=GRAPH_STYLE["edge_value_color"],
+                annotation_clip=False,
+            )
         txt.set_gid("cs470:edgeval")
         report[(u, v)] = {"side": side, "clearance_points": round(best_clear, 4),
                           "angle_deg": round(angle, 2)}
@@ -1769,6 +1899,8 @@ def draw_graph(
     group_legend=True,
     frame_nodes=False,
     edge_values=None,
+    edge_values_upright=False,
+    edge_values_stacked_fractions=False,
 ):
     """Draw a networkx graph in the project's style.
 
@@ -1849,6 +1981,11 @@ def draw_graph(
         called at all when it is None, so the deployed corpus is BYTE-IDENTICAL.
         Applied last, after ``frame_nodes``, because the perpendicular is taken
         against the display transform and the limits must already be final.
+    edge_values_upright, edge_values_stacked_fractions : bool, optional
+        Both default **False**, i.e. the shipped rotated / plain-text rendering,
+        unchanged. Forwarded verbatim to :func:`draw_edge_value_labels` as
+        ``upright`` and ``stacked_fractions``; see that function for why the
+        upright offset has to be measured rather than computed from a constant.
 
     Returns
     -------
@@ -2017,7 +2154,9 @@ def draw_graph(
     # axis limits have to be final or every label is tilted against limits that
     # then moved. `None` skips the call entirely => byte-identical by default.
     if edge_values:
-        draw_edge_value_labels(G, pos, ax, edge_values, node_size=node_size)
+        draw_edge_value_labels(G, pos, ax, edge_values, node_size=node_size,
+                               upright=edge_values_upright,
+                               stacked_fractions=edge_values_stacked_fractions)
 
     ax.set_axis_off()
     return pos

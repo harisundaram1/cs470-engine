@@ -270,11 +270,119 @@ def test_directed_raises():
     check("a non-triple edge_values entry RAISES", ok3)
 
 
+# ---------------------------------------------------------------------------
+# 7 — the UPRIGHT variant (opt-in). Four claims, each with its red case.
+# ---------------------------------------------------------------------------
+def test_upright():
+    G = _graph([("A", "B"), ("B", "C")])
+    # A steep edge is the whole point: B-C rises 1.4 over 1.0, so the rotated
+    # label is ~54 deg off horizontal and the upright one must be at 0.
+    fig, ax = plt.subplots(figsize=(6, 3.8))
+    draw_graph(G, ax, pos=PATH_POS, node_size=600)
+    rot = draw_edge_value_labels(G, PATH_POS, ax, {("B", "C"): 1}, node_size=600)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(6, 3.8))
+    draw_graph(G, ax, pos=PATH_POS, node_size=600)
+    up = draw_edge_value_labels(G, PATH_POS, ax, {("B", "C"): 1}, node_size=600,
+                                upright=True)
+    plt.close(fig)
+
+    check("default is STILL rotated on a steep edge",
+          abs(rot[("B", "C")]["angle_deg"]) > 45,
+          f"{rot[('B', 'C')]['angle_deg']:.1f} deg")
+    check("upright=True reports angle 0", up[("B", "C")]["angle_deg"] == 0.0)
+
+    # DEFAULT-OFF, at the smallest scale: the shipped path is untouched.
+    def _png(**kw):
+        fig, ax = plt.subplots(figsize=(6, 3.8))
+        draw_graph(G, ax, pos=PATH_POS, node_size=600,
+                   edge_values={("A", "B"): 1, ("B", "C"): Fraction(3, 2)}, **kw)
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=100)
+        plt.close(fig)
+        return hashlib.sha256(buf.getvalue()).hexdigest()
+
+    check("omitting the flags is byte-identical to passing them False",
+          _png() == _png(edge_values_upright=False,
+                         edge_values_stacked_fractions=False))
+    check("RED CASE: upright=True actually CHANGES the render",
+          _png() != _png(edge_values_upright=True))
+
+    # The offset is derived from the label's OWN width, so a wider label on the
+    # same edge must be pushed FURTHER out. A constant offset would tie.
+    def _push(text):
+        fig, ax = plt.subplots(figsize=(6, 3.8))
+        draw_graph(G, ax, pos=PATH_POS, node_size=600)
+        draw_edge_value_labels(G, PATH_POS, ax, {("B", "C"): text},
+                               node_size=600, upright=True)
+        t = _labels(ax)[0]
+        off = t.get_position()
+        plt.close(fig)
+        return math.hypot(*off)
+
+    narrow, wide = _push("1"), _push("1888888888")
+    check("RED CASE: a WIDER label is pushed FURTHER out (offset is measured, "
+          "not constant)", wide > narrow + 1.0, f"{narrow:.2f} -> {wide:.2f} pt")
+
+    # F7 again, on the new path: the push is INK. Same figure at two dpi must
+    # give the same POINTS offset (and therefore 2x the pixels).
+    def _push_at(dpi):
+        fig, ax = plt.subplots(figsize=(6, 3.8), dpi=dpi)
+        draw_graph(G, ax, pos=PATH_POS, node_size=600)
+        draw_edge_value_labels(G, PATH_POS, ax, {("B", "C"): Fraction(3, 2)},
+                               node_size=600, upright=True)
+        off = math.hypot(*_labels(ax)[0].get_position())
+        plt.close(fig)
+        return off
+
+    p100, p200 = _push_at(100), _push_at(200)
+    # ⚠ TOLERANCE, AND WHY IT IS NOT ZERO. The rotated path's gap is a constant
+    # and matches to 4 decimals (check 4 above). This push is part constant and
+    # part MEASURED, and a text's extent comes back through the renderer's own
+    # layout rounding, which is dpi-dependent at the sub-0.1 pt level. So the
+    # honest assertion is not "identical" but "does not SCALE": a frozen
+    # `dpi/72` anywhere in the path gives ratio 2.0, and 1% separates that from
+    # metric noise by a factor of ~100. Asserting equality here would be a gate
+    # tuned until it passed.
+    ratio = p200 / p100
+    check("F7: the upright push is POINTS — does not scale with dpi "
+          "(ratio 1, not 2)", abs(ratio - 1.0) < 0.01,
+          f"{p100:.4f} -> {p200:.4f} pt, ratio {ratio:.4f}")
+
+    # stacked fractions: opt-in, integers untouched, and NOT via the shared
+    # _exchange_value_label (whose contract is no-mathtext for L4/L5/L6).
+    fig, ax = plt.subplots(figsize=(6, 3.8))
+    draw_graph(G, ax, pos=PATH_POS, node_size=600,
+               edge_values={("A", "B"): 4, ("B", "C"): Fraction(3, 2)},
+               edge_values_upright=True, edge_values_stacked_fractions=True)
+    got = sorted(t.get_text() for t in _labels(ax))
+    plt.close(fig)
+    check("stacked_fractions: 3/2 -> mathtext, 4 stays plain",
+          got == [r"$\frac{3}{2}$", "4"], f"got {got}")
+
+    from cs470_engine.plot_style import _exchange_value_label
+    check("the SHARED L4/L5/L6 formatter is unchanged (still no mathtext)",
+          _exchange_value_label(Fraction(3, 2)) == "3/2")
+
+    # The clearance report must still be able to FAIL on this path.
+    G2 = _graph([("A", "B"), ("C", "A")], nodes=["A", "B", "C"])
+    bad_pos = {"A": (0.0, 0.0), "B": (2.0, 0.0), "C": (1.0, 0.0)}
+    fig, ax = plt.subplots(figsize=(6, 3.8))
+    draw_graph(G2, ax, pos=bad_pos, node_size=600)
+    rep = draw_edge_value_labels(G2, bad_pos, ax, {("A", "B"): 1},
+                                 node_size=600, upright=True)
+    plt.close(fig)
+    check("RED CASE: upright clearance goes NEGATIVE on a node at the midpoint",
+          rep[("A", "B")]["clearance_points"] < 0,
+          f"{rep[('A', 'B')]['clearance_points']:.2f} pt")
+
+
 def main():
     print("test_edge_values.py — the Lesson-10 edge-value layer")
     for fn in (test_draws_and_formats, test_none_is_byte_identical,
                test_perpendicular_is_display_space, test_gap_is_ink_not_data,
-               test_clearance_can_fail, test_directed_raises):
+               test_clearance_can_fail, test_directed_raises, test_upright):
         print(f"\n{fn.__name__}:")
         fn()
     print(f"\n{'ALL PASS' if not FAILURES else 'FAILURES: ' + ', '.join(FAILURES)}")

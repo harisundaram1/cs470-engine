@@ -755,6 +755,14 @@ def _resolve_graph_annotations(figure_spec: dict, G) -> dict:
         # `show_labels` evaporated on this branch before v0.11.1 (see the note
         # above them).
         "edge_values": _edge_values_from_spec(figure_spec),
+        # The two Lesson-10 rendering flags for that layer. RETURNED here beside
+        # the allowlist entries below for the same reason as `edge_values`
+        # itself: an allowlist entry alone is half a change, and the half that is
+        # missing fails SILENTLY. Both default False, so a spec that names
+        # neither renders exactly as before.
+        "edge_values_upright": bool(figure_spec.get("edge_values_upright", False)),
+        "edge_values_stacked_fractions":
+            bool(figure_spec.get("edge_values_stacked_fractions", False)),
     }
 
 
@@ -820,6 +828,10 @@ _GRAPH_KEYS_UNDIRECTED = frozenset({
     # is absent LOUDLY, which is the one thing the 0.8.0/v0.11.1 evaporation bugs
     # were not. Same precedent, same reason, as `frame_nodes` above.
     "edge_values",
+    # How that layer renders: horizontal labels pushed clear of the shaft by
+    # their own measured extent, and stacked-mathtext fractions. Both undirected-
+    # only for the same reason `edge_values` is — they are meaningless without it.
+    "edge_values_upright", "edge_values_stacked_fractions",
 })
 _GRAPH_KEYS_DIRECTED = frozenset({
     "highlight_color", "node_values_below", "value_caption", "below_caption",

@@ -27,6 +27,49 @@ every L10 figure carrying betweenness would RAISE on the unknown spec key. **A t
 hard prerequisite of the L10 deploy.** Deliberately deferred: L10 is not deploying yet, and the cut
 should carry whatever else the authoring crunch adds rather than being spent on one layer.
 
+### Added — `upright` / `stacked_fractions` on the edge-value layer (2026-08-10)
+
+From Hari's L10 walk: the rotated labels read bottom-to-top on near-vertical edges, and inline
+`3/2` is hard to scan against integers on the same figure. Both new flags default **False**, so
+the rendering above is unchanged unless a caller opts in — **1340 render-ids across all 19
+deployed worksheets re-rendered byte-identical**, baseline from a pristine `git worktree` with
+`plot_style.__file__` asserted on both sides and the pristine copy asserted to LACK both symbols.
+
+⚠ **THIS DIFF IS NOT `+N/−0`, AND THE DISTINCTION MATTERS HERE.** The parent `edge_values` layer
+above could claim *"+238/−0: no existing line changed"*, which is a structural argument that
+nothing could have moved. This one is **`+184/−33`** on the package: the per-edge loop body was
+re-indented into an `else:` branch so the rotated path and the upright path sit side by side.
+**33 existing lines were touched, so the structural argument is NOT available and the byte-identity
+run is the ONLY evidence** — which is why it was captured from a pristine worktree rather than
+reasoned about. Do not re-quote this change as "additive" in the `−0` sense; it is additive in
+BEHAVIOUR, proven, not additive in TEXT.
+
+- **`upright=True`** draws the label horizontally and pushes it out along the display-space
+  perpendicular until its **measured bounding box** clears the shaft by `gap`.
+  ⚠ **The push is DERIVED, not a constant, and that is the whole correctness argument.** The
+  rotated path's gap is width-independent because the text lies along the shaft — which is what
+  carries it across Helvetica → DejaVu (above). An upright label gives that up: an axis-aligned box
+  loses `(w/2)|n_x| + (h/2)|n_y|` of clearance to its own corners, and `w` moves with the font. So
+  the offset is computed from the label's own extent **at render time, in whatever font is
+  resolved**. A points constant measured on the laptop and applied in the container is exactly the
+  live `MAX_LABEL_RATIO` bug; this must not re-land it.
+  The returned `clearance_points` is measured against the **whole box** on this path (against the
+  anchor point on the rotated one), because that is the shape the ink actually occupies.
+- **`stacked_fractions=True`** renders a non-unit denominator as `$\frac{p}{q}$`; integers stay
+  plain. ⚠ **It uses a NEW `_stacked_value_label`, deliberately NOT `_exchange_value_label`** —
+  that formatter is shared with the deployed Lesson-4/5/6 exchange rows and its contract is *never
+  mathtext* (the Lesson-4 double-wrap crash class). Widening it would have moved live figures and
+  re-landed that class. A test asserts the shared formatter still returns `"3/2"`.
+- Forwarded from the YAML as `edge_values_upright` / `edge_values_stacked_fractions`, **allowlisted
+  *and* returned** — the same half-change trap as the parent layer.
+- **Red cases in the same commit** (`tests/test_edge_values.py::test_upright`, suite now **24/24**):
+  a **wider label is pushed further out** (10.61 → 35.34 pt — proves the offset is measured, not
+  constant); the push does **not** scale with dpi; omitting the flags is byte-identical to passing
+  them False; upright genuinely changes the render; clearance can still go negative.
+  ⚠ The dpi check asserts **ratio ≈ 1 within 1%**, not equality: this push is part-measured and a
+  text extent comes back through the renderer's own layout rounding (14.8001 vs 14.6881 pt), while
+  a frozen `dpi/72` would give ratio **2.0**. Asserting equality would be a gate tuned until green.
+
 ### Added — `draw_graph(..., edge_values=...)` and `draw_edge_value_labels`
 
 Betweenness and per-root flow are properties **of an edge**, and every existing annotation layer
