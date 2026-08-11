@@ -18,9 +18,26 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ## [0.12.0] — 2026-08-10 — the edge-value label layer, tagged and imaged for the Lesson 10 deploy
 
+**🎉 DEPLOYED LIVE 2026-08-10 — Gate 5 PASSED** (Hari, live PL): 10.1 and 10.2 both render, grading
+records scores, answer keys **30/30 each**, widgets exercised across their range, figures clean —
+including the **accepted `5/2` slash collision** in 10.1 `concept_why_communities` at `bridges=4`,
+which he confirmed reads at PL scale. **L1–L10 are now ALL live.** Image census: 11 × `v0.7.0` ·
+4 × `v0.10.3` · 4 × `v0.11.1` · **2 × `v0.12.0`** = 21.
+
 Cut to serve the **L10 (10.1 + 10.2) deploy**, which cannot run on `v0.11.1`: that image has no
 `draw_edge_value_labels`, so every L10 figure carrying betweenness would RAISE on the unknown spec
 key. Image `harisundaram/cs470-workspace:v0.12.0`.
+
+**⚠ THE UPRIGHT PATH'S FONT-REGIME RISK WAS REAL, WAS MEASURED, AND DID NOT BITE.** The section
+below argued that an upright label gives up the rotated path's width-independence and so must be
+re-verified in the container rather than reasoned about. **MEASURED in-container at the deploy,
+146 edge labels across every control state of both sheets: own-shaft clearance is EXACTLY
+4.500 pt in BOTH regimes, while 100 of the 146 label boxes CHANGE WIDTH** Helvetica → DejaVu (up
+to **+1.62 pt** on two-digit labels). **The derived push absorbs the whole font delta, so
+`MAX_LABEL_RATIO`'s failure class — a constant measured in one regime and applied in another — did
+NOT re-land.** ⚠ **This is evidence FOR the design, not a licence to skip the check**: the
+container render is what turned "it should transfer" into "it transfers", and the argument for
+re-running it on the next upright consumer is unchanged.
 
 **⚠ MEASURE THE DELTA AGAINST THE TAG, NOT AGAINST THE PARENT COMMIT — the two disagree and only
 one of them describes the live corpus.** Read commit-to-commit, the fix pass below is `+184/−33`
