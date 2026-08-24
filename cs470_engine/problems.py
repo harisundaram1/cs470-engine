@@ -763,7 +763,69 @@ def _resolve_graph_annotations(figure_spec: dict, G) -> dict:
         "edge_values_upright": bool(figure_spec.get("edge_values_upright", False)),
         "edge_values_stacked_fractions":
             bool(figure_spec.get("edge_values_stacked_fractions", False)),
+        # 🧨 CATEGORICAL GROUPING + PER-EDGE STYLE — the THIRD instance of the
+        # evaporation bug on this branch, and the first one found in a DEPLOYED
+        # figure. `node_groups` / `group_colors` / `group_legend` are in
+        # `_GRAPH_KEYS_COMMON` and `edge_styles` in `_GRAPH_KEYS_UNDIRECTED`, so
+        # `_check_figure_keys` accepted all four and this resolver returned none
+        # of them: `draw_graph` took its defaults and the request SILENTLY DID
+        # NOT HAPPEN. Only the DIRECTED resolver ever forwarded the group keys.
+        #
+        # MEASURED (2026-08-23, all 29 worksheets, 83 graph specs, 70
+        # undirected): exactly ONE figure names any of them — 10.1's
+        # `bipartite_pairs`, used by `q_28`, DEPLOYED, whose whole subject is a
+        # drawn division. It rendered as four identical white circles with no
+        # legend. Its own sheet's CONCEPT cells colour their partitions
+        # correctly, because a concept module calls `draw_graph(**kwargs)`
+        # directly and never passes through this dispatch.
+        #
+        # ⚠ BYTE-IDENTITY HAS ONE KNOWN, INTENDED EXCEPTION. `_draw_grouped_nodes`
+        # with an empty `node_groups` is EXACTLY the legacy open-circle pass and
+        # `group_legend` is inert without groups, so 69 of the 70 undirected
+        # figures render unchanged. `bipartite_pairs` CHANGES, and that change IS
+        # the fix — do not read a byte-identity failure there as a regression.
+        "node_groups": _node_groups_from_spec(figure_spec, G),
+        "group_colors": figure_spec.get("group_colors") or {},
+        "group_legend": bool(figure_spec.get("group_legend", True)),
+        "edge_styles": _edge_styles_from_spec(figure_spec),
     }
+
+
+def _node_groups_from_spec(figure_spec: dict, G):
+    """``node_groups`` as a ``{node: group}`` map, or ``{}``.
+
+    Accepts the same two shapes the directed resolver does — an explicit map, or
+    a ``{compute: bowtie|scc}`` block — so the two branches cannot drift into
+    different YAML dialects for one key.
+    """
+    ng = figure_spec.get("node_groups")
+    if isinstance(ng, dict) and "compute" in ng:
+        return _compute_node_groups(ng, G)
+    return dict(ng) if ng else {}
+
+
+def _edge_styles_from_spec(figure_spec: dict):
+    """Parse ``edge_styles: [[u, v, "dashed"], ...]`` into ``{(u, v): style}``.
+
+    YAML has no tuple keys, so the wire shape is a list of triples — the same
+    shape `edge_values` already uses, deliberately, rather than inventing a
+    second convention for the same idea. Returns ``None`` when absent so
+    `draw_graph` takes its own default and the deployed corpus is untouched.
+    """
+    raw = figure_spec.get("edge_styles")
+    if not raw:
+        return None
+    if isinstance(raw, dict):                     # already {(u, v): style}
+        return {tuple(k) if isinstance(k, (list, tuple)) else k: v
+                for k, v in raw.items()}
+    out = {}
+    for item in raw:
+        if not (isinstance(item, (list, tuple)) and len(item) == 3):
+            raise ValueError(
+                "figure kind 'graph': every 'edge_styles' entry must be a "
+                f"[u, v, style] triple; got {item!r}.")
+        out[(item[0], item[1])] = item[2]
+    return out
 
 
 def _edge_values_from_spec(figure_spec: dict):

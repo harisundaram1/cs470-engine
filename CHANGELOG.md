@@ -16,6 +16,56 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [UNRELEASED] — the undirected forwarding fix, and the boundary test that makes it the last one
+
+⚠ **NOT TAGGED, NOT IMAGED, NOT DEPLOYED.** No version bump. This rides Lesson 10's next touch,
+batched with the docketed legibility items — it is not worth an engine cycle of its own for one
+figure that is currently still answerable. Until it is tagged and baked, nothing on the platform
+has changed.
+
+**THE FIX (~6 lines).** `_resolve_graph_annotations` — the **undirected** branch — now forwards
+`node_groups`, `group_colors`, `group_legend` and `edge_styles`. All four were allowlisted by
+`_GRAPH_KEYS_COMMON` / `_GRAPH_KEYS_UNDIRECTED`, so `_check_figure_keys` accepted them, and the
+resolver returned none of them: `draw_graph` took its defaults and **the request silently did not
+happen.** Only the *directed* resolver had ever forwarded the group keys. `node_groups` accepts the
+same `{compute: bowtie|scc}` block the directed branch does, so the two cannot drift into different
+YAML dialects; `edge_styles` takes `[[u, v, style], …]` triples, the shape `edge_values` already
+uses.
+
+**THE BLAST RADIUS, MEASURED** (2026-08-23; 29 worksheets, 83 graph specs, 70 undirected): **one
+figure.** Deployed **10.1 `bipartite_pairs`**, used by `q_28`, whose entire subject is a drawn
+division and which rendered as **four identical white circles with no legend**. L11–L14: not
+affected. And the concept modules were never affected at all — they call `draw_graph(**kwargs)`
+directly, so **10.1's own concept cells coloured their partitions correctly while its question
+figure did not.**
+
+**BYTE-IDENTITY HAS ONE KNOWN, INTENDED EXCEPTION — stated rather than left to a failing check.**
+Rendering every undirected figure in the corpus through the old resolver and the new one:
+**69 of 70 byte-identical; `bipartite_pairs` changes, and that change IS the fix.**
+`_draw_grouped_nodes` with an empty `node_groups` is exactly the legacy open-circle pass and
+`group_legend` is inert without groups, which is why the other 69 cannot move.
+
+**⭐ THE DURABLE HALF — `tests/test_undirected_forwarding.py` gains a BOUNDARY test.** This bug has
+now landed three times on one seam (0.8.0 directed, 0.11.1 `node_size`/`show_labels`, and this),
+and each fix forwarded the key someone happened to notice. `_check_figure_keys` enforces *"an
+unknown key is an error, not a shrug"* and has a hole exactly where a key is **known to the
+allowlist and unknown to the resolver**: `totally_bogus_key` raises, `node_groups` was silent. The
+test asserts the invariant instead of the keys —
+
+    allowlist − dispatch-consumed − resolver-forwarded  ==  ∅   (per renderer)
+
+— so a future allowlist entry nobody wires up fires the day it lands. It ships with its own red
+case, and MEASURED: it fails on the pre-fix resolver naming all four keys. ⚠ If it ever fails, do
+not widen the exemption sets to make it pass; that is how the invariant becomes decoration.
+
+⚠ **Pre-existing and NOT touched here:** `tests/test_sponsored_search.py::test_R1_declash_does_
+fire_on_the_two_line_chapter_15_header` fails in a full-suite run and passes when its file is run
+alone — a test-ordering / shared-state defect. **Measured at HEAD without this change: same single
+failure** (140 passed / 1 failed there, 145 / 1 here, the five extra being the new tests). Not
+discharged, and this is not an all-green suite.
+
+---
+
 ## [0.12.0] — 2026-08-10 — the edge-value label layer, tagged and imaged for the Lesson 10 deploy
 
 **🎉 DEPLOYED LIVE 2026-08-10 — Gate 5 PASSED** (Hari, live PL): 10.1 and 10.2 both render, grading
