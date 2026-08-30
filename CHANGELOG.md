@@ -64,6 +64,29 @@ alone — a test-ordering / shared-state defect. **Measured at HEAD without this
 failure** (140 passed / 1 failed there, 145 / 1 here, the five extra being the new tests). Not
 discharged, and this is not an all-green suite.
 
+**⚠ STILL UNRELEASED AS OF 2026-08-30, AND L11 DEPLOYED PAST IT — THE ARGUMENT THAT MADE THAT SAFE
+IS WORTH KEEPING, BECAUSE THE OLD ONE NO LONGER WORKS.** Until this entry existed, a content cycle
+was certified by `git diff <tag>..HEAD -- cs470_engine/` being **empty**. It is not empty and will
+not be again until this rides L10's next touch, so **that test is retired.** What replaced it at
+L11's deploy is a **REACHABILITY** argument, and it is the method to reuse:
+
+1. **Read the diff against `[UNRELEASED]`** and confirm every file in it is intended to be
+   unreleased — here `problems.py` (+62), `test_undirected_forwarding.py` (+139), this file (+67),
+   `+268/−0`, nothing else.
+2. **Ask what the unreleased code can REACH**, not whether it exists. This fix lives entirely in
+   `_resolve_graph_annotations`' **undirected** branch. **L11 declares ZERO graph figures** — its
+   only kinds are `xy_curve` (4 shared) and `payoff_matrix` (1), and neither concept module calls
+   `draw_graph`. So the fix cannot reach the lesson, whatever the diff says.
+3. **Confirm from the IMAGE side too**, so the argument has two independent ends: `v0.12.0` lacks
+   `_node_groups_from_spec` and `_edge_styles_from_spec` and carries `draw_edge_value_labels`.
+
+⇒ **A non-empty engine diff does not make a cycle an ENGINE cycle. Unreachable code is not shipped
+code.** L11 went out as a **CONTENT cycle** on `v0.12.0` — no tag, no build, no image-sync.
+
+⚠ **THE STANDING CONSEQUENCE, restated because it survives this deploy:** the authoring tree and the
+deployed image now **disagree** about 10.1 `bipartite_pairs`. A local render of that figure is not
+evidence about what a student sees until this is tagged and baked.
+
 ---
 
 ## [0.12.0] — 2026-08-10 — the edge-value label layer, tagged and imaged for the Lesson 10 deploy
