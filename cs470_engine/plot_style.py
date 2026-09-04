@@ -2363,7 +2363,31 @@ def draw_matrix(ax, values, *, row_labels=None, col_labels=None, corner=None,
 
 #: Game-theory figure styling. Kept here (no inline literals in render code).
 PAYOFF_STYLE = {
-    "cell_size_in":     1.15,   # per-cell side length (inches), pre-margin
+    # 🧨 1.15 -> 1.45 (2026-09-04). At 1.15 the payoff string is WIDER THAN THE
+    # CELL for several matrices in the course: MEASURED in-container at retina,
+    # `penalty_kick`'s cell is 94.9 px and `$(0.58,\ {-}0.58)$` is 105.9 px, and
+    # the 11.0 px overlap is exactly that subtraction. There is no per-figure
+    # lever -- `_render_payoff_matrix` forwards no size and no font size, and
+    # v0.12.0's payoff_matrix allowlist has no size key either -- so the cell
+    # size is the only place this can be fixed.
+    #
+    # ⚠ IT WAS NEVER ONE FIGURE. Measured over all 29 payoff_matrix figures in
+    # the course, the baseline has FIVE with colliding text, on FOUR sheets, all
+    # of them deployed: 2.1 `hawk_dove` (1), 2.2 `run_pass` (1), 2.2
+    # `stag_hunt_weak` (2), 2.2 `penalty_kick` (2), 5.1 `ultimatum_payoff` (1).
+    # Two of those had never been measured before this pass.
+    #
+    # ⚠ AND THE OBVIOUS SMALLER VALUES DO NOT CLEAR IT. Measured, same harness:
+    #     payoff_fontsize 11   -> clears 1 of 5, and shrinks text in all 29
+    #     cell_size_in    1.30 -> penalty_kick clears by 0.3 px. Not a margin.
+    #     cell_size_in    1.35 -> clears 4 of 5; `ultimatum_payoff` still hits
+    #                             'offer 5' against the rotated 'Proposer'
+    #     cell_size_in    1.45 -> clears ALL FIVE, 0 overflow, and all 29 still
+    #                             RECONSTRUCT exactly from drawn text
+    # Both measures are required: either alone clears a real defect. Raising the
+    # cell keeps text at 13 pt, so nothing gets harder to read; the cost is that
+    # every payoff matrix grows (a 2x2 canvas 325 -> ~385 px).
+    "cell_size_in":     1.45,   # per-cell side length (inches), pre-margin
     "margin_in":        0.95,   # left/top margin for player + strategy labels
     "payoff_fontsize":  13,
     "strategy_fontsize": 12,

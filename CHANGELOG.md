@@ -16,6 +16,62 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [UNRELEASED] — `PAYOFF_STYLE["cell_size_in"]` 1.15 → 1.45: the payoff string was wider than its cell
+
+### Fixed — five payoff matrices in the course had colliding cell text, on four DEPLOYED sheets
+
+At `cell_size_in = 1.15` the drawn payoff string overflows the cell it sits in
+whenever the numbers are long. MEASURED in-container at retina, v0.12.0 engine:
+`penalty_kick`'s cell is **94.9 px** and `$(0.58,\ {-}0.58)$` is **105.9 px**, so
+the 11.0 px overlap is exactly that subtraction, not an estimate.
+
+⚠ **IT WAS NEVER ONE FIGURE.** Measured over **all 29 `payoff_matrix` figures in
+the course**, the baseline has **five** with colliding text, on **four sheets, all
+deployed** — 2.1 `hawk_dove` (1), 2.2 `run_pass` (1), 2.2 `stag_hunt_weak` (2),
+2.2 `penalty_kick` (2), 5.1 `ultimatum_payoff` (1). Only 2.2's three had ever been
+measured; the other two were found by asking the question corpus-wide instead of
+figure by figure.
+
+⚠ **AND THE SMALLER VALUES DO NOT CLEAR IT** (same harness, same run):
+
+| candidate | clears | note |
+|---|---|---|
+| `payoff_fontsize` 13 → 11 | **1 of 5** | and shrinks text in all 29 |
+| `cell_size_in` 1.15 → 1.30 | 1 of 5 | `penalty_kick` by 0.3 px — not a margin |
+| `cell_size_in` 1.15 → 1.35 | 4 of 5 | `ultimatum_payoff` still hits `'offer 5'` against the rotated `'Proposer'` |
+| **`cell_size_in` 1.15 → 1.45** | **5 of 5** | 0 overflow, and all 29 still RECONSTRUCT exactly |
+
+**Acceptance was BOTH measures, because either alone clears a real defect:** the
+matrix must have **zero text collisions** AND **reconstruct exactly from the
+drawn text artists**. Result with 1.45: **29/29 figures, 0 collisions, 0
+overflow, 29/29 reconstruct.** The collision counter is not stuck at zero — the
+same function reports 5 on the baseline in the same run.
+
+**There was no per-figure alternative.** `_render_payoff_matrix` forwards no size
+and no font size at either tag, and v0.12.0's `payoff_matrix` allowlist is eight
+keys, none of them a size. A YAML-side workaround exists — string payoffs
+(`".58"`) pass through `_format_pair` verbatim and clear the overlap — and was
+**rejected**: it abuses the type, so a later `highlight: nash` would run `max()`
+over strings and be silently wrong, and it breaks the redesign repo's
+`derive_l2_2_new_keys.py`.
+
+### Blast radius, stated
+
+Text stays at 13 pt, so nothing becomes harder to read; **every payoff matrix
+grows** — a 2×2 canvas goes 325 → ~385 px. All 29 change size. That is the cost,
+and it is why this is its own release rather than a ride-along.
+
+### Testing
+
+`pytest tests/` — **145 passed, 1 failed, identical with and without this
+change.** The failure,
+`test_sponsored_search.py::test_R1_declash_does_fire_on_the_two_line_chapter_15_header`,
+is **pre-existing and order-dependent**: it fails in the full suite at HEAD too
+and passes when that file runs alone. Test pollution in the suite, unrelated to
+this change, and not bumped.
+
+---
+
 ## [UNRELEASED] — the undirected forwarding fix, and the boundary test that makes it the last one
 
 ⚠ **NOT TAGGED, NOT IMAGED, NOT DEPLOYED.** No version bump. This rides Lesson 10's next touch,
