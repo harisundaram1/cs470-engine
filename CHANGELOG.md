@@ -37,7 +37,9 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 > into an axes the engine already made at `FIGURE_STYLE["concept_figsize"]`, so the cell size never
 > reaches it: **15 concept states still collide, byte-identically before and after.** On 2.2,
 > `q_12`'s `run_pass` question figure is now clean while `concept_mixed_examples` above it still
-> overlaps 18 px. **"The payoff collisions are fixed" is false as stated** — fixed on the
+> overlaps **2.4 × 18.0 px**. ⚠ **NOT "18 px" — `dy` SATURATES** at the text height for two
+> texts sharing a baseline, so it ranks nothing; by AREA 2.2 is only **third**, at 2% of the worst
+> (9.1 `concept_where_mass`, 2025 px²). **"The payoff collisions are fixed" is false as stated** — fixed on the
 > shared-figure path, unfixed on the concept-cell path.
 
 > **⚠ THIS RELEASE CARRIES TWO CODE CHANGES, NOT ONE.** The payoff fix below is
