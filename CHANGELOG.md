@@ -16,9 +16,25 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
-## [UNRELEASED] — `PAYOFF_STYLE["cell_size_in"]` 1.15 → 1.45: the payoff string was wider than its cell
+## [0.13.0] — 2026-09-07 — `PAYOFF_STYLE["cell_size_in"]` 1.15 → 1.45: the payoff string was wider than its cell
 
-### Fixed — five payoff matrices in the course had colliding cell text, on four DEPLOYED sheets
+> **⚠ THIS RELEASE CARRIES TWO CODE CHANGES, NOT ONE.** The payoff fix below is
+> what the cycle was cut for; the **undirected forwarding fix** (next section)
+> had been deliberately parked as `[UNRELEASED]` on the stated grounds that it
+> was *"not worth an engine cycle of its own for one figure."* A cycle is now
+> happening anyway, so that reason expired and it ships here rather than
+> accumulating as a second untagged delta. **It reaches no student on release
+> day:** the only figure it changes is 10.1 `bipartite_pairs`, and 10.1 stays
+> pinned to `v0.12.0` — the disagreement between the authoring tree and the
+> deployed image becomes a **pin** question instead of a **tag** question, which
+> is the strictly better place for it.
+>
+> ⇒ **Both changes are declared in the redesign repo's
+> `scripts/payoff_release_check.py` `PREDICTED` table, and its `--diff` FAILS on
+> any figure that moves outside them.** That is the acceptance for this release,
+> because byte-identity is not available — see *Blast radius* below.
+
+### Fixed — five payoff matrices in the course had colliding cell text, on three DEPLOYED sheets
 
 At `cell_size_in = 1.15` the drawn payoff string overflows the cell it sits in
 whenever the numbers are long. MEASURED in-container at retina, v0.12.0 engine:
@@ -31,6 +47,32 @@ deployed** — 2.1 `hawk_dove` (1), 2.2 `run_pass` (1), 2.2 `stag_hunt_weak` (2)
 2.2 `penalty_kick` (2), 5.1 `ultimatum_payoff` (1). Only 2.2's three had ever been
 measured; the other two were found by asking the question corpus-wide instead of
 figure by figure.
+
+> **🔴 RE-MEASURED AT RELEASE, 2026-09-07 — IT IS SIX FIGURES, NOT FIVE, AND
+> THREE SHEETS, NOT FOUR.** The corpus sweep run against the shipping `v0.12.0`
+> image (`scripts/payoff_release_check.py`, all 29 sheets, every shared figure)
+> reports **31 payoff matrices** — 29 of them on deployed sheets, plus one each
+> on 12.1 and 12.2, which have no assessment yet — and **six** with colliding
+> text, in **eight** colliding pairs:
+>
+> | sheet | figure | pairs | worst overlap |
+> |---|---|---|---|
+> | 2.1 | `hawk_dove` | 1 | 1.9 × 0.6 px — `Hawk` / `Animal 1` |
+> | 2.1 | **`hawk_dove_mild`** | 1 | 1.9 × 0.6 px — `Hawk` / `Animal 1` |
+> | 2.2 | `penalty_kick` | 2 | 11.0 × 22.7 px |
+> | 2.2 | `run_pass` | 1 | 3.7 × 18.0 px |
+> | 2.2 | `stag_hunt_weak` | 2 | 18.0 × 3.5 px |
+> | 5.1 | `ultimatum_payoff` | 1 | 10.7 × 18.0 px |
+>
+> **`hawk_dove_mild` is the one the earlier sweep missed**, and its overlap is
+> *geometrically identical* to `hawk_dove`'s — the same figure shape with milder
+> numbers. Two figures colliding the same way, one counted and one not, is the
+> signature of a sweep that walked a list of figures instead of asking the
+> corpus a question. The count that mattered for the fix is unaffected (1.45
+> clears all six), but the **"four sheets" in the heading above was always
+> wrong**: the five originally-named figures live on 2.1, 2.2 and 5.1 — three
+> sheets. Corrected in the heading; left visible here so a later reader sees the
+> correction rather than a silently different number.
 
 ⚠ **AND THE SMALLER VALUES DO NOT CLEAR IT** (same harness, same run):
 
@@ -72,12 +114,22 @@ this change, and not bumped.
 
 ---
 
-## [UNRELEASED] — the undirected forwarding fix, and the boundary test that makes it the last one
+## [0.13.0] — 2026-09-07 — the undirected forwarding fix, and the boundary test that makes it the last one
 
-⚠ **NOT TAGGED, NOT IMAGED, NOT DEPLOYED.** No version bump. This rides Lesson 10's next touch,
-batched with the docketed legibility items — it is not worth an engine cycle of its own for one
-figure that is currently still answerable. Until it is tagged and baked, nothing on the platform
-has changed.
+⚠ **TAGGED AND IMAGED 2026-09-07, IN `v0.13.0`, ALONGSIDE THE PAYOFF FIX — BUT STILL REACHING NO
+STUDENT.** This section previously read *"NOT TAGGED, NOT IMAGED, NOT DEPLOYED … this rides Lesson
+10's next touch; it is not worth an engine cycle of its own for one figure."* **The premise
+expired**: an engine cycle was cut for the payoff fix, so shipping this one costs nothing extra,
+and leaving it parked would have meant carrying a second untagged delta past a release that could
+have absorbed it.
+
+**What did NOT change is who can see it.** 10.1 and 10.2 remain pinned to `v0.12.0` — this cycle
+repointed **only 2.1, 2.2 and 5.1**, the sheets carrying colliding payoff matrices — so
+`bipartite_pairs` still renders its four white circles for every student until L10 is repointed.
+⇒ **The standing consequence below is NOT discharged; it changed category.** The authoring tree and
+the deployed image still disagree about that one figure, but the fix is now baked in a tag and the
+remaining step is a **pin move**, not an engine cycle. L10's next touch repoints and the figure
+corrects itself.
 
 **THE FIX (~6 lines).** `_resolve_graph_annotations` — the **undirected** branch — now forwards
 `node_groups`, `group_colors`, `group_legend` and `edge_styles`. All four were allowlisted by
