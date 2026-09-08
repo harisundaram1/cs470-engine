@@ -18,6 +18,28 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ## [0.13.0] — 2026-09-07 — `PAYOFF_STYLE["cell_size_in"]` 1.15 → 1.45: the payoff string was wider than its cell
 
+> **✅ CLOSED OUT 2026-09-07. TAGGED, IMAGED, SYNCED, REPOINTED, AND GATE 5 PASSED ON 2.1 AND 2.2**
+> — Hari verified live in PL that the payoff matrices render clean at the new size. **5.1 is
+> repointed and unverified**; its credit window opens **2026-09-30**, so its Gate 5 is not yet due.
+>
+> **⚠ THIS WAS AN ENGINE CYCLE AND THE IMAGE-SYNC STEP WAS REQUIRED** — Docker Hub → PL's own
+> registry, a separate action from git-sync. Worth stating plainly because the last several deploys
+> were **content** cycles on an existing pin, where image-sync is *not* run: the recent habit is
+> the exception here, not the rule, and *"not found in the registry"* means the step was skipped,
+> not that something is broken.
+>
+> Artifacts: engine `9ad086d` / `v0.13.0` · image digest `sha256:594ce013…` (local == registry) ·
+> `pl-cs498hs` `12e406d` · pin census **13 × `v0.12.0` · 4 × `v0.11.1` · 4 × `v0.10.3` ·
+> 3 × `v0.13.0` = 24 ✓** (re-measured from the live `info.json` files at close-out, not carried).
+>
+> **🔴 AND THE FIX IS HALF A FIX — see `CS_470_Redesign/DEBT.md` §16.** `cell_size_in` sizes the
+> figure inside `_render_payoff_matrix`, which is the **question** path. A **concept cell** draws
+> into an axes the engine already made at `FIGURE_STYLE["concept_figsize"]`, so the cell size never
+> reaches it: **15 concept states still collide, byte-identically before and after.** On 2.2,
+> `q_12`'s `run_pass` question figure is now clean while `concept_mixed_examples` above it still
+> overlaps 18 px. **"The payoff collisions are fixed" is false as stated** — fixed on the
+> shared-figure path, unfixed on the concept-cell path.
+
 > **⚠ THIS RELEASE CARRIES TWO CODE CHANGES, NOT ONE.** The payoff fix below is
 > what the cycle was cut for; the **undirected forwarding fix** (next section)
 > had been deliberately parked as `[UNRELEASED]` on the stated grounds that it
