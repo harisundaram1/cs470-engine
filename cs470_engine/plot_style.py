@@ -4479,6 +4479,280 @@ def is_balanced(G, matching, values):
     return True
 
 
+# --- the balanced-outcome SOLVER (Section 12.8) -------------------------------
+#
+# ``is_balanced`` above VERIFIES a proposed outcome. The routines below SOLVE for
+# the balanced outcomes of a graph, which is a strictly harder problem and the one
+# every chapter-12 exercise actually asks ("which node makes the most money?").
+#
+# ⚠ WHY THE OBVIOUS APPROACH DOES NOT WORK. Balance is a fixed point in which the
+# values define the outside options and the outside options define the values, so
+# the tempting method is to fix a matching and iterate values to convergence. That
+# does not close: an UNMATCHED neighbor has value 0 and therefore offers an outside
+# option of 1, so a partial matching drives a pair's outside options past 1, where
+# ``nash_bargaining_split`` correctly returns None and the iteration has nowhere to
+# go. THE MATCHING MUST BE SEARCHED JOINTLY WITH THE VALUES.
+#
+# THE METHOD, and it is exact rather than numerical. Enumerate matchings. For each
+# matching, the only nonlinearity left is the ``max`` inside ``best_outside_option``,
+# so enumerate WHICH neighbor supplies each node's best outside option; under that
+# guess the balance condition is a LINEAR system, solved exactly over Fractions.
+# A candidate is kept only if the guessed argmax really is the argmax, the values
+# lie in [0, 1], and the independent checker ``is_balanced`` agrees. Exact rational
+# arithmetic means the keys come out as 1/3 and 3/4, not 0.3333333333333333.
+#
+# ⚠ STABILITY IS PART OF THE FILTER, AND THAT IS NOT A STYLE CHOICE. Balance is
+# defined only on the edges IN the matching, so the empty matching is balanced
+# VACUOUSLY, and a partial matching that leaves two adjacent nodes unmatched is
+# balanced while those two make 0 + 0 < 1 between them. The book's remark that
+# "every balanced outcome is stable" proves only the part about nodes inside the
+# matching; it silently assumes the matching is MAXIMAL. So a solver that filtered
+# on ``is_balanced`` alone would report the all-zero outcome on every graph. This
+# is not a defect in ``is_balanced`` — that function implements the book's
+# definition of BALANCE faithfully and is left exactly as it was.
+#
+# ⚠ AND THE ANSWER IS OFTEN NOT UNIQUE, WHICH THE API SAYS OUT LOUD. The book
+# itself refers to "methods to compute the SET OF ALL balanced outcomes". Three
+# distinct shapes occur on graphs this small:
+#   * both unique         -- four-node path, stem graph: everything is keyable;
+#   * matching NOT unique but values determined -- three- and five-node paths:
+#     key on the values, NEVER on who exchanges with whom;
+#   * a CONTINUUM         -- the four-cycle admits (t, 1-t, t, 1-t) for every t in
+#     [0, 1], all stable and all balanced: nothing here is keyable at all.
+# ``solve_balanced`` reports which case holds; ``balanced_values`` REFUSES to
+# return anything when the values are not determined, so an item cannot be keyed
+# on a quantity the mechanism does not fix.
+
+#: Safety cap on the matching enumeration. Chapter 12's graphs have at most a
+#: handful of edges; a caller who hands over something large gets a loud error
+#: rather than a hang.
+_EXCHANGE_MATCHING_CAP = 20000
+
+
+def _exchange_matchings(G, cap=_EXCHANGE_MATCHING_CAP):
+    """Every matching of ``G``, including the empty one, as tuples of edge pairs.
+
+    Enumerated recursively so only real matchings are generated (the recursion
+    prunes on the shared-endpoint test), not all edge subsets. Raises ValueError
+    past ``cap`` rather than running away.
+    """
+    edges = [tuple(sorted(e, key=str)) for e in G.edges()]
+    found = []
+
+    def rec(i, chosen, used):
+        if len(found) > cap:
+            raise ValueError(
+                f"more than {cap} matchings; the balanced-outcome solver is "
+                f"meant for the small exchange networks of chapter 12")
+        if i == len(edges):
+            found.append(tuple(chosen))
+            return
+        rec(i + 1, chosen, used)
+        u, v = edges[i]
+        if u not in used and v not in used:
+            rec(i + 1, chosen + [(u, v)], used | {u, v})
+
+    rec(0, [], set())
+    return found
+
+
+def _exchange_solve_linear(nodes, rows):
+    """Exact Gauss-Jordan over Fraction.
+
+    ``rows`` is a list of ``(coefficients_by_node, rhs)``. Returns
+    ``("unique", {node: Fraction})``, ``("inconsistent",)`` when no solution
+    exists, or ``("free", n_free)`` when the solution set is a continuum — which
+    is REPORTED rather than resolved, because picking a representative of an
+    undetermined family is exactly what must never happen here.
+    """
+    idx = {n: i for i, n in enumerate(nodes)}
+    width = len(nodes) + 1
+    m = []
+    for coef, rhs in rows:
+        row = [Fraction(0)] * width
+        for n, c in coef.items():
+            row[idx[n]] += Fraction(c)
+        row[-1] = Fraction(rhs)
+        m.append(row)
+    pivots, r = [], 0
+    for col in range(len(nodes)):
+        p = next((k for k in range(r, len(m)) if m[k][col] != 0), None)
+        if p is None:
+            continue
+        m[r], m[p] = m[p], m[r]
+        pv = m[r][col]
+        m[r] = [x / pv for x in m[r]]
+        for k in range(len(m)):
+            if k != r and m[k][col] != 0:
+                f = m[k][col]
+                m[k] = [a - f * b for a, b in zip(m[k], m[r])]
+        pivots.append(col)
+        r += 1
+        if r == len(m):
+            break
+    for k in range(r, len(m)):
+        if all(x == 0 for x in m[k][:-1]) and m[k][-1] != 0:
+            return ("inconsistent",)
+    if len(pivots) < len(nodes):
+        return ("free", len(nodes) - len(pivots))
+    return ("unique", {nodes[c]: m[i][-1] for i, c in enumerate(pivots)})
+
+
+def _balanced_for_matching(G, matching):
+    """Balanced value assignments for ONE fixed matching, exactly.
+
+    Returns ``(values_list, underdetermined)``. ``values_list`` holds every exact
+    ``{node: Fraction}`` solution found; ``underdetermined`` is True when some
+    argmax assignment left a continuum of solutions, in which case this matching's
+    contribution is NOT determined and no representative is invented.
+    """
+    nodes = sorted(G.nodes(), key=str)
+    partner = {}
+    for u, v in matching:
+        partner[u] = v
+        partner[v] = u
+    matched = sorted(partner, key=str)
+    elig = {u: [y for y in sorted(G.neighbors(u), key=str) if y != partner[u]]
+            for u in matched}
+    space = [elig[u] if elig[u] else [None] for u in matched]
+
+    found, underdetermined = [], False
+    for pick in itertools.product(*space):
+        guess = dict(zip(matched, pick))
+        rows = [({n: 1}, 0) for n in nodes if n not in partner]
+        for u, w in matching:
+            # the two partners split exactly one unit
+            rows.append(({u: 1, w: 1}, 1))
+            # 2*v(u) - outside(u) + outside(w) = 1, with outside(x) = 1 - v(guess[x])
+            coef, rhs = {u: 2}, 1
+            if guess[u] is not None:
+                coef[guess[u]] = coef.get(guess[u], 0) + 1
+                rhs += 1
+            if guess[w] is not None:
+                coef[guess[w]] = coef.get(guess[w], 0) - 1
+                rhs -= 1
+            rows.append((coef, rhs))
+
+        kind = _exchange_solve_linear(nodes, rows)
+        if kind[0] == "free":
+            underdetermined = True
+            continue
+        if kind[0] != "unique":
+            continue
+        sol = kind[1]
+        if any(not (0 <= v <= 1) for v in sol.values()):
+            continue
+        # the GUESSED argmax must actually BE the argmax ...
+        consistent = True
+        for u in matched:
+            want = max([1 - sol[y] for y in elig[u]], default=Fraction(0))
+            got = Fraction(0) if guess[u] is None else 1 - sol[guess[u]]
+            if got != want:
+                consistent = False
+                break
+        if not consistent:
+            continue
+        # ... and the independent checker must agree, which also rejects any
+        # candidate whose matched pair has outside options summing past 1 (the
+        # no-deal branch of nash_bargaining_split).
+        as_float = {k: float(v) for k, v in sol.items()}
+        if is_balanced(G, matching, as_float) and sol not in found:
+            found.append(sol)
+    return found, underdetermined
+
+
+def solve_balanced(G, cap=_EXCHANGE_MATCHING_CAP):
+    """Every stable balanced outcome of ``G``, exactly (Sections 12.7-12.8).
+
+    Returns a dict:
+
+    ``outcomes``
+        list of ``(matching, values)``, matching as a tuple of ``(u, v)`` pairs
+        and values as ``{node: Fraction}``. Empty when the graph has no stable
+        outcome at all -- the triangle is the book's example.
+    ``node_values``
+        ``{node: sorted tuple of the distinct values it takes}`` across the
+        outcomes. ⚠ A one-element tuple means that node's value is pinned ONLY
+        when ``determined`` is True. When a continuum coexists, the listed
+        outcomes are isolated MEMBERS of a larger family -- measured on K4 minus
+        an edge, where the all-one-half point is reported while a whole
+        one-parameter family of stable balanced outcomes surrounds it.
+    ``determined``
+        True only when no continuum was found AND every node's value is pinned.
+        ⚠ READ THIS BEFORE READING ``outcomes``: a graph with a continuum reports
+        zero point-outcomes, and mistaking that for "no balanced outcome exists"
+        is the reading this flag exists to prevent.
+    ``matching_unique``
+        whether all the outcomes share one matching. The five-node path has three
+        matchings and one set of values, so this is False while ``determined`` is
+        True -- key on the values, never on who exchanges with whom.
+    ``underdetermined``
+        the matchings under which the balance system had a continuum of solutions.
+
+    Stability is applied as a filter; see the block comment above for why balance
+    alone admits the all-zero outcome on every graph.
+    """
+    outcomes, undetermined_ms = [], []
+    for matching in _exchange_matchings(G, cap=cap):
+        values, continuum = _balanced_for_matching(G, matching)
+        if continuum:
+            undetermined_ms.append(matching)
+        for v in values:
+            if is_stable(G, matching, {k: float(x) for k, x in v.items()}):
+                outcomes.append((matching, v))
+    per_node = {}
+    for _, v in outcomes:
+        for k, x in v.items():
+            per_node.setdefault(k, set()).add(x)
+    node_values = {k: tuple(sorted(s)) for k, s in per_node.items()}
+    determined = (not undetermined_ms
+                  and bool(outcomes)
+                  and all(len(s) == 1 for s in node_values.values()))
+    return {
+        "outcomes": outcomes,
+        "node_values": node_values,
+        "determined": determined,
+        "matching_unique": len({m for m, _ in outcomes}) <= 1,
+        "underdetermined": tuple(undetermined_ms),
+    }
+
+
+def balanced_values(G, cap=_EXCHANGE_MATCHING_CAP):
+    """The balanced value of every node, or a ValueError naming why there is none.
+
+    ⚠ THIS IS THE ONE TO KEY AN ITEM ON, precisely because it cannot return a
+    guess. It raises when the graph has no stable outcome (the triangle), when the
+    balance system admits a continuum (the four-cycle), and when two stable
+    balanced outcomes disagree about some node's value. Any of those means the
+    mechanism does not determine the number, and an item keyed on it would have no
+    defensible answer.
+
+    On success returns ``{node: Fraction}`` -- exact, so a key reads 3/4 rather
+    than 0.75. The matching may still be non-unique; that is fine and common, and
+    is why this returns values only. Call ``solve_balanced`` for the matchings.
+    """
+    res = solve_balanced(G, cap=cap)
+    # ⚠ ORDER MATTERS. The continuum test comes FIRST and does not consult
+    # ``outcomes``: a graph can report point outcomes AND carry a continuum around
+    # them (K4 minus an edge does), and testing ``outcomes`` first fell through to
+    # the disagreement branch below, which then printed an empty spread.
+    if res["underdetermined"]:
+        raise ValueError(
+            "the balanced outcome is a CONTINUUM under "
+            f"{len(res['underdetermined'])} matching(s): the values are not "
+            "determined and nothing may be keyed on them")
+    if not res["outcomes"]:
+        raise ValueError(
+            "this graph has no stable outcome, so it has no balanced outcome "
+            "(the triangle of Section 12.7 is the book's example)")
+    if not res["determined"]:
+        spread = {k: v for k, v in res["node_values"].items() if len(v) > 1}
+        raise ValueError(
+            "the stable balanced outcomes disagree, so these values are not "
+            f"determined: {spread}")
+    return {k: v[0] for k, v in res["node_values"].items()}
+
+
 # --- renderer: bipartite matching market -------------------------------------
 
 #: Matching-market figure styling (Lesson 4). Centralized — no inline literals in

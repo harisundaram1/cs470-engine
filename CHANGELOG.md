@@ -16,6 +16,93 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## [UNRELEASED] — the BALANCED-OUTCOME SOLVER: the engine could test balance, not solve for it
+
+> **⚠ NOT TAGGED. The tag decision is Hari's** — see `CS_470_Redesign/DEBT.md` §18. Nothing else is
+> waiting in the engine: the only commits after `v0.13.0` are two CHANGELOG corrections, so a tag
+> cut for this would carry the solver **alone**, with nothing to share the image build, the
+> image-sync and the repoints with.
+
+**WHAT IT IS.** `solve_balanced(G)` and `balanced_values(G)` in `plot_style.py`, beside the
+existing checkers. The engine has had `is_balanced` / `is_stable` / `best_outside_option` since
+Lesson 5 was built; those **verify** a proposed outcome. Every chapter-12 exercise instead asks
+*which node makes the most money*, which requires **solving** for the outcome — and that is why
+L5's six-exercise bank yielded zero items.
+
+**WHY THE OBVIOUS METHOD FAILS, measured.** Balance is a fixed point in which values set outside
+options and outside options set values, so the tempting approach is to fix a matching and iterate.
+It does not close: an **unmatched neighbor has value 0 and so offers an outside option of 1**, which
+drives a pair past the no-deal bound, where `nash_bargaining_split` correctly returns `None`
+(`nash_bargaining_split(0.6, 0.5) is None`). **THE MATCHING MUST BE SEARCHED JOINTLY WITH THE
+VALUES.** So: enumerate matchings; for each, enumerate which neighbor supplies each node's best
+outside option; under that guess the condition is **linear** and is solved **exactly over
+`Fraction`** — keys read `1/3`, never `0.3333333333333333`.
+
+**⭐ THE BOOK IS THE INDEPENDENT CHECK, and all five narrated results reproduce.**
+
+| graph | solver | Easley & Kleinberg |
+|---|---|---|
+| four-node path | `(1/3, 2/3, 2/3, 1/3)` | Fig 12.8(b) |
+| stem graph | `(1/4, 3/4, 1/2, 1/2)`, unique | Fig 12.9, *"the unique balanced outcome"* |
+| three-node path | B gets `1` | p316, *"B ... gets the full one unit"* |
+| five-node path | b, d get `1`; c gets `0` | p316, *"values of 1 to the off-center nodes"* |
+| triangle | **no outcome** | p317, *"there is no stable outcome for the triangle"* |
+
+**THE STABILITY FILTER IS NOT A STYLE CHOICE.** Balance constrains only the edges **in** the
+matching, so `is_balanced(G, [], {})` is **vacuously True on every graph**, and a partial matching
+leaving two adjacent nodes unmatched is balanced while they make `0 + 0 < 1` between them. A solver
+filtering on balance alone reports the **all-zero outcome everywhere**. The book's remark that
+*"every balanced outcome is stable"* proves only the part about nodes inside the matching and
+silently assumes a **maximal** matching. **This is not a defect in `is_balanced`** — it implements
+the book's definition of BALANCE faithfully and is **left byte-identical**, as is
+`nash_bargaining_split`, whose `None` is the right answer for its own contract.
+
+**⚠ THE TIE INVENTORY — the answer is usually NOT unique, and the API says so.** Three shapes occur
+on graphs this small, and a **majority** of graphs are not keyable at all (measured: of 766
+connected graphs on 4–5 nodes, **436 carry a continuum**, 87 have no stable outcome, 243 are fully
+determined):
+
+* **both unique** — four-node path, stem graph: everything is keyable;
+* **matching non-unique, values determined** — three- and five-node paths (the five-node path has
+  **three** matchings and **one** value set): key on the values, **never** on who exchanges with whom;
+* **a CONTINUUM** — the four-cycle admits `(t, 1-t, t, 1-t)` for **every** `t`, all stable and all
+  balanced. Confirmed by an independent brute force, not just by the solver's own report.
+
+`balanced_values` **RAISES** in all three failing cases, so **an item cannot be keyed on a quantity
+the mechanism does not determine**. ⚠ And the trap that flag exists to prevent: a continuum graph
+reports **zero** point outcomes, so `outcomes` read alone says *"no balanced outcome exists"* and is
+wrong. On K4-minus-an-edge, point outcomes and a continuum **coexist** and `node_values` looks like
+a determined singleton — `determined` is the field to read.
+
+**ADDITIVE, PROVEN TWO WAYS, tag-to-tag and seed-pinned.**
+* **Code objects**: 203 pre-existing symbols across `plot_style`, `problems` and `link_analysis`
+  fingerprinted under both trees — **203 identical, 6 added, 0 removed, 0 changed**. Red case:
+  the same comparator on `v0.12.0 -> v0.13.0` correctly reports `PAYOFF_STYLE` and
+  `_resolve_graph_annotations` as **changed**.
+* **Deployed corpus**: 1,084 figures rendered under each tree — **1,084 identical, 0 changed,
+  0 vanished, 0 added**. Red case: `v0.12.0 -> v0.13.0` on the same instrument reports **32 changed**,
+  reproducing that cycle's known result. The two runs are told apart by a **tag-exclusive symbol**
+  (`hasattr(plot_style, "solve_balanced")`), because `importlib.metadata.version` reads the
+  **installed wheel** and reported `0.11.0` for all three source trees.
+* **Invariant 8, both halves.** FREE pass first to DETECT: two unseeded runs of the *same* engine
+  differ on **26 of 1,084** figures, in four of 12.1's concept cells (DEBT §15's family) — so a
+  "differs" on those is never evidence. Then PINNED at `PYTHONHASHSEED=470` to COMPARE.
+
+**`tests/test_balanced_outcomes.py`** — the five book fixtures, the tie inventory by name, and
+eleven red cases including the vacuity trap, the `None` no-deal branch, the continuum, and an
+independent grid search proving the answer is the **whole** answer. ⚠ **Mutation-tested**: dropping
+the stability filter, hiding the continuum, perturbing the balance equation and letting
+`balanced_values` return a guess are each caught. A fifth mutation — deleting the internal
+argmax-consistency check — **survived**, because `is_balanced` rejects a wrong guess anyway; the
+redundancy is now asserted explicitly rather than left as an untested branch.
+
+**WHAT IT DOES NOT DO.** Per-edge stakes. Exercise 4(b) places **$2** on one edge and $10 on the
+others; this model puts **$1 on every edge**, and a uniform $10 is only a rescale. That exercise is
+**not authorable** without an edge-weighted generalization, which is not built here.
+
+---
+
+
 ## [0.13.0] — 2026-09-07 — `PAYOFF_STYLE["cell_size_in"]` 1.15 → 1.45: the payoff string was wider than its cell
 
 > **✅ CLOSED OUT 2026-09-07. TAGGED, IMAGED, SYNCED, REPOINTED, AND GATE 5 PASSED ON 2.1 AND 2.2**
