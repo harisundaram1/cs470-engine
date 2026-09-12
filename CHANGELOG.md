@@ -16,6 +16,24 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## Unreleased — docstring correction (2026-09-12)
+
+### Fixed
+- **`alpha_naive_lsq`'s docstring quoted numbers its own function does not
+  return.** It read *"1.93 at k_min=5 -> 0.88 at k_min=50 on the committed
+  sample"*; MEASURED on that same committed sample the values are **1.9235** and
+  **0.8974** — neither figure even a correct rounding, in the docstring of the
+  function that produces them. Corrected, and the docstring now points at
+  `scripts/derive_l9_new_keys.py` in the worksheets repo so the numbers are
+  re-derived rather than quoted. ⚠ It also now states what this estimator is
+  *not*: on the **exact** stationary law it reads 2.998–2.999 at every `k_min`
+  from 1 to 200, so it is **not a biased estimator** — it is undone by finite
+  samples only. (`alpha_mle`'s 2.570-exact-vs-2.561-sample gap is the opposite
+  case: pure curvature, immune to sample size.)
+- **DOCSTRING ONLY — no behaviour change, no new symbol, no tag.** Same defect
+  class as the `CLAUDE.md` §1 correction made the same day: a number that was
+  copied forward for months because nobody re-ran the function.
+
 ## [UNRELEASED] — the BALANCED-OUTCOME SOLVER: the engine could test balance, not solve for it
 
 > **⚠ NOT TAGGED. The tag decision is Hari's** — see `CS_470_Redesign/DEBT.md` §18. Nothing else is

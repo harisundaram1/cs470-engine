@@ -522,7 +522,16 @@ def alpha_naive_lsq(counts, k_min):
     >>> the equal weighting and the empty-bin dropping ARE THE BUG, and they must
     NOT be "fixed": on a finite sample the sparse, high-variance tail bins each
     get a full equal vote, so the fit diverges catastrophically as ``k_min`` rises
-    (C3 Figure B: 1.93 at k_min=5 -> 0.88 at k_min=50 on the committed sample).
+    (C3 Figure B: 1.9235 at k_min=5 -> 0.8974 at k_min=50 on the committed
+    sample; 0.307 by k_min=100). ⚠ NUMBERS CORRECTED 2026-09-12 — this
+    docstring read "1.93 -> 0.88", which is neither value rounded. RE-DERIVE
+    RATHER THAN QUOTE: `python3.12 scripts/derive_l9_new_keys.py` in the
+    worksheets repo prints the full k_min sweep for both estimators.
+    ⚠ AND NOTE WHAT THIS ESTIMATOR IS *NOT*: on the EXACT stationary law it
+    reads 2.998-2.999 at EVERY k_min from 1 to 200. It is NOT a biased
+    estimator — it is undone by FINITE SAMPLES only, and the collapse above
+    vanishes entirely when the noise does. (`alpha_mle`'s 2.570-vs-2.561
+    exact-vs-sample gap is the opposite case: pure curvature, immune to n.)
     That divergence is exactly ws1 P9's point; deleting it deletes the lesson. <<<
 
     ``counts`` is ``{k: count}`` (or ``(k, count)`` pairs). Needs >= 2 non-empty
