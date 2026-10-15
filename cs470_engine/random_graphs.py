@@ -418,12 +418,18 @@ def ek_stationary_indegree(p, k_max):
     Returns ``[(k, f_k) for k in 0..k_max]`` — a plotting-ready EXACT distribution,
     NO sampler. Its asymptotic exponent is ``1 + 1/q = exponent_from_p(p)``.
 
+    At ``p = 1/2`` the recurrence is ``4 / ((k+1)(k+2)(k+3))``; E&K §18.7's
+    ``2(k+1)^-3`` is the book's deterministic APPROXIMATION of it (E&K pp. 490,
+    493), not this law.
+
     This is C3 Figure A's data. The whole point (vs a sampled degree list) is that
     it is INFINITE-DATA: the ``alpha_mle`` @ ``k_min = 5`` bias it exhibits (2.57
     at ``p = 1/2``, truth 3.0) is a CURVATURE / BODY property of the distribution,
-    present with zero sampling noise and invariant to the tail cap ``k_max`` — a
-    fundamentally different bias from C3 Figure B's finite-sample LSQ divergence.
-    Deterministic, byte-identical forever.
+    present with zero sampling noise and invariant to the tail cap ``k_max``.
+    ⚠ CORRECTED 2026-10-15: ``alpha_naive_lsq`` fitted to this exact pmf is NOT the
+    limit of the naive fit on a sample (see that function's docstring); the two
+    estimators carry different systematic errors. Deterministic, byte-identical
+    forever.
     """
     _check_prob(p, "p")
     if not (isinstance(k_max, int) and k_max >= 0):
@@ -527,11 +533,19 @@ def alpha_naive_lsq(counts, k_min):
     docstring read "1.93 -> 0.88", which is neither value rounded. RE-DERIVE
     RATHER THAN QUOTE: `python3.12 scripts/derive_l9_new_keys.py` in the
     worksheets repo prints the full k_min sweep for both estimators.
-    ⚠ AND NOTE WHAT THIS ESTIMATOR IS *NOT*: on the EXACT stationary law it
-    reads 2.998-2.999 at EVERY k_min from 1 to 200. It is NOT a biased
-    estimator — it is undone by FINITE SAMPLES only, and the collapse above
-    vanishes entirely when the noise does. (`alpha_mle`'s 2.570-vs-2.561
-    exact-vs-sample gap is the opposite case: pure curvature, immune to n.)
+    ⚠ CORRECTED 2026-10-15 (CS 470 L9 red team): this docstring used to say the
+    estimator "is NOT a biased estimator — it is undone by FINITE SAMPLES only",
+    because on the EXACT stationary pmf it reads 2.998-2.999 at every k_min. That
+    reading is a property of where the support is cut (2.85 with the pmf cut at
+    k <= 200, 2.998 only near 10^5), and a fit to the exact pmf is not the limit
+    of the fit to a sample. On samples drawn from the exact law it levels off near
+    2.3 at k_min = 5 and never approaches 3 (1.94 with 4x10^5 draws, 2.28 with
+    4x10^8, 2.32 with 4x10^10): empty bins are dropped and one-page bins sit on a
+    floor above the true line, each with a full vote. It IS biased at every
+    sample size. It approximates the exponent only where no near-empty bin votes
+    (well-filled bins only, or log-binned counts). `alpha_mle`'s 2.570-vs-2.561
+    exact-vs-sample gap is a different error: the curved body, immune to n.
+    Re-derive: CS_470_Redesign/scripts/verify_l9_redteam.py lsq lsq_regimes.
     That divergence is exactly ws1 P9's point; deleting it deletes the lesson. <<<
 
     ``counts`` is ``{k: count}`` (or ``(k, count)`` pairs). Needs >= 2 non-empty

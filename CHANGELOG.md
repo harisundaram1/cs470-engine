@@ -16,6 +16,19 @@ tagged AND baked into the image — see the redesign repo's `CLAUDE.md` §3.
 
 ---
 
+## Unreleased — docstring correction (2026-10-15)
+
+### Fixed
+- **`alpha_naive_lsq` IS a biased estimator; the 2026-09-12 entry below said it was not.** That entry read
+  the fit's 2.998–2.999 on the exact stationary pmf as *"not a biased estimator — it is undone by finite
+  samples only"*. The 2.999 is a property of where the pmf's support is cut (2.85 with the cut at k ≤ 200);
+  on samples drawn from the exact law the fit levels off near 2.3 at `k_min = 5` (1.94 with 4×10^5 draws,
+  2.32 with 4×10^10) and never approaches 3, because empty bins are dropped and one-page bins sit on a floor
+  above the line. Found by the CS 470 L9 red team; both docstrings (`alpha_naive_lsq`,
+  `ek_stationary_indegree`) corrected. `ek_stationary_indegree` also now says that at p = ½ it is
+  `4/((k+1)(k+2)(k+3))`, and that E&K §18.7's `2(k+1)^-3` is the book's approximation of it. Docstrings
+  only: no behavior changes, no tag. Re-derivation: `CS_470_Redesign/scripts/verify_l9_redteam.py`.
+
 ## Unreleased — docstring correction (2026-09-12)
 
 ### Fixed
